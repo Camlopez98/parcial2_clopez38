@@ -1,0 +1,24 @@
+@startuml c4-nivel1-contexto
+!include <C4/C4_Context>
+LAYOUT_TOP_DOWN()
+title Nivel 1 - Diagrama de contexto: Plataforma de Inscripción Académica (PIA)
+
+Person(estudiante, "Estudiante", "Consulta la oferta, inscribe y cancela asignaturas y consulta el estado de sus solicitudes. ~24.000 estudiantes; hasta 1.200 conectados al tiempo.")
+Person(registro, "Funcionario de registro académico", "Configura el período, las fechas de inscripción y la capacidad autorizada de los grupos; atiende reclamaciones.")
+Person(auditor, "Auditor / control interno", "Consulta la trazabilidad de las operaciones académicas.")
+
+System(pia, "Plataforma de Inscripción Académica (PIA)", "Administra las inscripciones del período: valida prerrequisitos, horarios y cupos; registra la trazabilidad y sincroniza las inscripciones oficiales con el legado.")
+
+System_Ext(legado, "Sistema académico legado", "Fuente oficial de estudiantes, asignaturas, historial académico y prerrequisitos. Registro oficial de inscripciones. Puede no responder hasta 40 min (C05).")
+System_Ext(idp, "Proveedor de identidad institucional", "Autentica a estudiantes y funcionarios con la cuenta institucional (OIDC / LDAP).")
+System_Ext(correo, "Servidor de correo institucional", "Entrega notificaciones a los estudiantes (SMTP).")
+
+Rel(estudiante, pia, "Consulta oferta, inscribe, cancela y consulta estado", "HTTPS")
+Rel(registro, pia, "Configura período, fechas y cupos; consulta inscripciones", "HTTPS")
+Rel(auditor, pia, "Consulta registros de auditoría", "HTTPS")
+Rel(pia, legado, "Importa oferta e historial académico; registra inscripciones y cancelaciones oficiales", "Asíncrono, mediante adaptador de integración")
+Rel(pia, idp, "Delega la autenticación", "OIDC")
+Rel(pia, correo, "Envía notificaciones de confirmación o rechazo", "SMTP")
+
+SHOW_LEGEND()
+@enduml
