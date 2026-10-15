@@ -1,6 +1,6 @@
 # Parcial 2 — Propuesta de Arquitectura: Plataforma de Inscripción Académica (PIA)
 
-**Estudiante:** [NOMBRE] — **Documento:** [DOCUMENTO]
+**Estudiante:** Camilo Andrés López Hernández — **Documento:** 1233691138
 
 ## Resumen ejecutivo
 
