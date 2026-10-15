@@ -1,0 +1,37 @@
+@startuml c4-nivel2-contenedores
+!include <C4/C4_Container>
+LAYOUT_TOP_DOWN()
+title Nivel 2 - Diagrama de contenedores: PIA
+
+Person(estudiante, "Estudiante", "Hasta 1.200 conectados al tiempo")
+Person(registro, "Funcionario de registro / Auditor", "Configuración del período y auditoría")
+
+System_Boundary(pia, "Plataforma de Inscripción Académica (PIA)") {
+  Container(spa, "Aplicación web", "React (SPA, archivos estáticos)", "Interfaz de consulta, inscripción, cancelación y estado. Genera una clave de idempotencia por cada intento de inscripción o cancelación.")
+  Container(proxy, "Proxy inverso", "Nginx", "Terminación TLS, balanceo entre instancias de la API, verificación de salud, limitación de tasa por usuario y servicio de la aplicación web.")
+  Container(api, "API PIA (x2 instancias)", "Java 21, Spring Boot 3 - monolito modular hexagonal", "Módulos: oferta académica, inscripciones y cupos, reglas académicas, historial (copia local), auditoría y seguridad. Nunca invoca al legado de forma síncrona.")
+  Container(sync, "Sincronizador", "Java 21, Spring Boot 3 - misma base de código, proceso separado", "Importa oferta e historial desde el legado; despacha la bandeja de salida (outbox) hacia el legado con idempotencia, reintentos e interruptor de circuito; concilia y notifica.")
+  ContainerDb(db, "Base de datos PIA (primaria)", "PostgreSQL 16", "Esquemas por módulo: oferta, inscripcion, reglas, historial, auditoria, integracion (outbox, estado del legado, registro de idempotencia).")
+  ContainerDb(replica, "Réplica en espera", "PostgreSQL 16 (replicación en flujo)", "Copia casi en tiempo real para conmutación ante falla de la primaria (RTO <= 30 min).")
+  Container(backup, "Repositorio de respaldos", "pgBackRest sobre almacenamiento institucional", "Respaldos completos y archivado continuo del registro de transacciones (RPO <= 5 min).")
+}
+
+System_Ext(legado, "Sistema académico legado", "Fuente oficial del historial y prerrequisitos; registro oficial de inscripciones")
+System_Ext(idp, "Proveedor de identidad institucional", "OIDC")
+System_Ext(correo, "Servidor de correo institucional", "SMTP")
+
+Rel(estudiante, proxy, "Usa", "HTTPS")
+Rel(registro, proxy, "Usa", "HTTPS")
+Rel(proxy, spa, "Sirve archivos estáticos")
+Rel(spa, proxy, "Invoca la API", "HTTPS / JSON")
+Rel(proxy, api, "Reenvía solicitudes (round robin)", "HTTP / JSON")
+Rel(api, idp, "Valida tokens de acceso", "OIDC / JWT")
+Rel(api, db, "Lee y escribe en transacciones locales", "SQL / JDBC, pool acotado")
+Rel(sync, db, "Lee la outbox; escribe copia del historial, estados y estado del legado", "SQL / JDBC")
+Rel(sync, legado, "Consulta oferta e historial; registra inscripciones y cancelaciones", "Adaptador anticorrupción; protocolo según SUP-03")
+Rel(sync, correo, "Envía notificaciones", "SMTP")
+Rel(db, replica, "Replica cambios", "Replicación en flujo")
+Rel(db, backup, "Archiva registro de transacciones", "Archivado continuo")
+
+SHOW_LEGEND()
+@enduml

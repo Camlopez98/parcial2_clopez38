@@ -97,3 +97,46 @@ Fuente: [c4-nivel1-contexto.puml](diagramas/c4-nivel1-contexto.puml) · [PNG](di
 ### 2.3 Decisión de frontera más relevante
 
 El legado queda **fuera** del sistema y la relación con él es **asíncrona**. Las operaciones de usuario nunca esperan una respuesta del legado. El Sincronizador intercambia datos con él en segundo plano, que es la condición necesaria para cumplir QAS-01.
+
+---
+
+## 3. Nivel 2: diagrama de contenedores
+
+![Diagrama de contenedores C4](diagramas/c4-nivel2-contenedores.svg)
+
+Fuente: [c4-nivel2-contenedores.puml](diagramas/c4-nivel2-contenedores.puml) · [PNG](diagramas/c4-nivel2-contenedores.png)
+
+### 3.1 Responsabilidades y justificación de cada contenedor
+
+| Contenedor | Responsabilidad | Driver que justifica su existencia | Qué pasaría sin él |
+|---|---|---|---|
+| Aplicación web (SPA) | Presentar la oferta, capturar inscripciones y cancelaciones, mostrar el estado real de cada solicitud (*pendiente de sincronización*, *confirmada*, *rechazada*). Genera una **clave de idempotencia** (UUID) por intento y la reenvía sin cambios en los reintentos. | QAS-03, QAS-01 (informar al estudiante) | Los reintentos del navegador no se distinguirían de solicitudes nuevas. |
+| Proxy inverso (Nginx) | Terminación TLS; balanceo entre las dos instancias de la API con verificación de salud; **limitación de tasa** por usuario y global; servicio de archivos estáticos. | QAS-04, DQ-01 (falla de una instancia), QAS-06 (TLS) | Una instancia caída dejaría a los usuarios sin servicio, y un pico de reintentos llegaría sin control a la base de datos. |
+| API PIA (2 instancias) | Ejecuta todos los casos de uso de usuario: consulta, inscripción, cancelación, estado, configuración y auditoría. Es **sin estado**: la sesión viaja en el token, por lo que cualquier instancia atiende cualquier solicitud. **Nunca llama al legado**: usa la copia local del historial y deja los eventos de sincronización en la bandeja de salida. | QAS-02, QAS-04, QAS-07 y, sobre todo, QAS-01 | — (es el núcleo). Con una sola instancia, cada despliegue o falla consumiría el presupuesto de C03. |
+| Sincronizador | Único contenedor que se comunica con el legado: (a) importa la oferta del período y la copia del historial antes de la apertura y la refresca de forma incremental; (b) despacha la bandeja de salida hacia el legado con idempotencia, reintentos con espera exponencial e interruptor de circuito; (c) actualiza el estado de cada inscripción (*confirmada* o *rechazada*) y la compensación del cupo; (d) concilia y envía notificaciones. | QAS-01, QAS-03, RES-03 | Si esta lógica viviera en la API, las esperas y reintentos contra un legado caído consumirían hilos y conexiones de la API y degradarían a todos los usuarios. |
+| Base de datos PIA (PostgreSQL) | Almacena oferta, cupos, inscripciones, copia del historial, reglas, auditoría y tablas de integración. Es el **único punto de consistencia fuerte**: las restricciones de unicidad y de capacidad se declaran aquí. | QAS-02, QAS-03, QAS-06, RES-01 | — (fuente de la verdad del período). |
+| Réplica en espera | Recibe los cambios de la primaria en tiempo casi real y se promueve si la primaria falla. | QAS-05 (RTO ≤ 30 min) | Una falla de la primaria obligaría a restaurar desde respaldo, lo que tarda más. |
+| Repositorio de respaldos (pgBackRest) | Respaldos completos y archivado continuo del registro de transacciones, con `archive_timeout` ≤ 60 s. | QAS-05 (RPO ≤ 5 min), protección ante corrupción lógica que la réplica también copiaría. | Ante un borrado o corrupción replicados no habría punto de recuperación. |
+
+No se incluyen un broker de mensajería, una caché distribuida ni un orquestador de contenedores. La bandeja de salida en PostgreSQL y la caché en memoria de cada instancia cubren los drivers sin agregar componentes que el equipo de RES-02 tendría que operar (ver CF-03 en la Actividad 1).
+
+### 3.2 Mecanismos de comunicación
+
+| Origen → destino | Mecanismo | Tipo | Justificación |
+|---|---|---|---|
+| Navegador → Proxy → API | HTTPS, REST con JSON. Encabezado `Idempotency-Key` en las operaciones de inscripción y cancelación. | Síncrono | Las consultas necesitan respuesta inmediata (QAS-04). La clave hace seguras las repeticiones (QAS-03). |
+| API → Proveedor de identidad | OpenID Connect; la API valida localmente la firma del token (JWT) con las claves públicas del proveedor, que guarda en caché. | Síncrono solo al iniciar sesión | Validar localmente evita que una lentitud del proveedor afecte cada solicitud. |
+| API → PostgreSQL | SQL por JDBC con un pool de conexiones acotado (por ejemplo, 30 por instancia). | Síncrono, transacción local | El pool acotado protege a la base de datos en los picos: las solicitudes que no consiguen conexión esperan un tiempo máximo y fallan rápido en lugar de saturarla. |
+| Módulo → módulo (dentro de la API) | Llamadas en memoria a través de las interfaces públicas (puertos) de cada módulo. Ningún módulo accede a las tablas de otro. | Síncrono, en proceso | Fronteras verificables sin costo de red (QAS-07, QAS-04). |
+| API → Sincronizador | **No hay llamada directa.** La API escribe eventos en la tabla `integracion.outbox` dentro de la misma transacción de negocio; el Sincronizador los lee. El Sincronizador publica el estado del legado en `integracion.estado_legado`, que la API consulta para informar al estudiante. | Asíncrono, a través de la base de datos | Patrón de bandeja de salida transaccional (Richardson, 2018): elimina la escritura dual y no exige un broker (RES-01, RES-02). |
+| Sincronizador → Legado | Adaptador anticorrupción (Evans, 2003) que traduce el modelo de PIA al del legado. El protocolo concreto (servicio web, acceso a base de datos o archivos) depende de SUP-03 y queda encapsulado en el adaptador. Tiempo máximo de espera de 5 s, interruptor de circuito y reintentos con espera exponencial y variación aleatoria. | Asíncrono respecto del usuario | Aísla a PIA de la forma y la disponibilidad del legado (QAS-01). |
+| Sincronizador → Correo | SMTP | Asíncrono | Las notificaciones no bloquean ninguna operación. |
+| PostgreSQL → Réplica y respaldos | Replicación en flujo y archivado continuo del registro de transacciones | Asíncrono | QAS-05. |
+
+### 3.3 Cómo responde la estructura al Escenario A
+
+Durante los 40 minutos sin legado:
+1. El interruptor de circuito del Sincronizador se abre tras 5 fallas seguidas o 30 s sin respuesta. El Sincronizador escribe `estado_legado = NO_DISPONIBLE` y deja de intentar enviar, salvo una prueba periódica cada 30 s.
+2. La API **no cambia su funcionamiento**: sigue validando contra la copia local del historial, descontando cupos en PostgreSQL y dejando eventos en la bandeja de salida. Como lee `estado_legado`, informa al estudiante: "Tu inscripción está registrada y reservada; será oficial cuando se sincronice con el sistema académico".
+3. Solo se restringen las inscripciones de estudiantes cuya copia del historial está marcada como no vigente (SUP-02). Se rechazan con un mensaje explícito y sin consumir cupo.
+4. Cuando el legado responde a la prueba, el interruptor se cierra y el Sincronizador vacía la bandeja de salida en orden de llegada, con un ritmo limitado para no saturar al legado recién recuperado.
