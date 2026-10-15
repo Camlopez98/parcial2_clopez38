@@ -1,0 +1,60 @@
+@startuml secuencia-escenario-a
+title Diagrama dinámico - Inscripción durante la indisponibilidad del legado (Escenario A) y recuperación
+autonumber
+actor Estudiante as E
+participant "Aplicación web" as W
+participant "Proxy inverso\n(Nginx)" as P
+participant "API PIA\n(Inscripciones)" as A
+database "PostgreSQL\nPIA" as D
+participant "Sincronizador" as S
+participant "Sistema\nlegado" as L
+
+== Inicio de matrícula: el legado deja de responder ==
+S -> L : Registrar inscripción pendiente (timeout 5 s)
+L --x S : Sin respuesta
+S -> S : 5 fallas seguidas: interruptor ABIERTO
+S -> D : estado_legado = NO_DISPONIBLE
+
+== Inscripción durante la falla (no depende del legado) ==
+E -> W : Inscribir grupo G
+W -> P : POST /inscripciones\nIdempotency-Key: K1
+P -> A : Reenvía (limitación de tasa aplicada)
+group T1 - una transacción local
+  A -> D : INSERT clave K1 (única)
+  A -> D : SELECT ... FOR UPDATE estudiante_periodo
+  A -> D : Lee copia del historial (vigente) y horarios
+  A -> A : Valida prerrequisitos, horario y créditos
+  A -> D : UPDATE grupo SET inscritos = inscritos + 1\nWHERE id = G AND inscritos < capacidad
+  A -> D : INSERT inscripcion (PENDIENTE_SINCRONIZACION)
+  A -> D : INSERT outbox (InscripcionRegistrada)
+  A -> D : INSERT auditoria
+  A -> D : COMMIT
+end
+A -> D : Lee estado_legado
+A --> W : 201 PENDIENTE_SINCRONIZACION\n+ aviso "aún no oficial"
+W --> E : "Registrada y reservada; será oficial al sincronizar"
+
+E -> W : Reintento (doble clic)
+W -> P : POST /inscripciones\nIdempotency-Key: K1
+P -> A : Reenvía
+A -> D : Clave K1 ya existe
+A --> W : Misma respuesta almacenada (sin nuevo cupo)
+
+== Recuperación (≤ 40 min después) ==
+S -> L : Prueba periódica (cada 30 s)
+L --> S : OK
+S -> S : Interruptor CERRADO
+S -> D : estado_legado = DISPONIBLE
+loop Por cada evento de la outbox (FOR UPDATE SKIP LOCKED, ritmo limitado)
+  S -> L : ¿Existe inscripción (estudiante, grupo, período)?
+  alt No existe
+    S -> L : Registrar inscripción (clave = id inscripción)
+  end
+  L --> S : Registrada / Rechazada
+  group T3 - una transacción local
+    S -> D : Inscripción -> CONFIRMADA o RECHAZADA\n(si RECHAZADA: inscritos = inscritos - 1)
+    S -> D : outbox -> procesado; INSERT auditoria
+  end
+  S -> E : Notificación por correo
+end
+@enduml

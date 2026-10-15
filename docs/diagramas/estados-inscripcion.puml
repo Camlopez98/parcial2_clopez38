@@ -1,0 +1,22 @@
+@startuml estados-inscripcion
+title Máquina de estados de una inscripción (Agregado Inscripción)
+hide empty description
+[*] --> PENDIENTE_SINCRONIZACION : Inscribir\n[reglas OK y cupo descontado]\n(T1)
+PENDIENTE_SINCRONIZACION --> CONFIRMADA : Legado registra la inscripción\n(T3)
+PENDIENTE_SINCRONIZACION --> RECHAZADA : Legado rechaza\n[se libera el cupo] (T3)
+PENDIENTE_SINCRONIZACION --> CANCELADA : Estudiante cancela antes de sincronizar\n[se libera el cupo] (T2)
+CONFIRMADA --> CANCELACION_PENDIENTE : Estudiante cancela\n[en fechas permitidas; se libera el cupo] (T2)
+CANCELACION_PENDIENTE --> CANCELADA : Legado registra la cancelación\n(T3)
+RECHAZADA --> [*]
+CANCELADA --> [*]
+note right of PENDIENTE_SINCRONIZACION
+  El estudiante ve: "Registrada y reservada.
+  Será oficial al sincronizar con el
+  sistema académico".
+  Ocupa cupo. No es oficial (RES-03).
+end note
+note right of CONFIRMADA
+  Única condición que se presenta
+  como inscripción oficial.
+end note
+@enduml

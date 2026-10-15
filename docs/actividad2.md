@@ -184,3 +184,103 @@ Se muestran como cajas en el diagrama porque el módulo de inscripciones los usa
 | Historial académico (copia) | Mantener la copia local, de solo lectura, del historial importado del legado, con marca de vigencia por estudiante. | Indirectamente, mediante Reglas. | QAS-01: permite validar prerrequisitos sin el legado. |
 | Oferta académica | Grupos, horarios y capacidad autorizada del período. Los cambios de capacidad los hace el funcionario de registro y quedan auditados. | Indirectamente, mediante Reglas (horarios y créditos). El control de cupos usa la tabla de grupos. | QAS-02, QAS-04 |
 | Auditoría | Insertar registros en una tabla de solo inserción. El usuario de base de datos de la aplicación no tiene permisos de UPDATE ni DELETE sobre ella. | A través del puerto `RegistradorAuditoria`, dentro de la transacción del caso de uso. | QAS-06 (CF-04) |
+
+---
+
+## 5. Límites transaccionales, dependencias y comportamiento dinámico
+
+### 5.1 Límites transaccionales
+
+Toda transacción es **local a PostgreSQL**. Ninguna transacción incluye una llamada a un sistema externo, porque el legado puede fallar a mitad de ella (C05) y no existe un protocolo de transacción distribuida con él.
+
+| ID | Transacción | Qué incluye (todo o nada) | Qué queda fuera, y por qué |
+|---|---|---|---|
+| T1 | Inscribir | Registro de la clave de idempotencia; bloqueo de `estudiante_periodo`; lectura de historial, horarios e inscripciones del estudiante; descuento condicional del cupo; inserción de la inscripción en *pendiente de sincronización*; inserción del evento en la bandeja de salida; registro de auditoría. | El registro en el legado: lo hace el Sincronizador en T3, después del commit. |
+| T2 | Cancelar | Clave de idempotencia; transición a *cancelación pendiente* (o directamente a *cancelada* si nunca se sincronizó); liberación del cupo; evento en la bandeja de salida; auditoría. | La cancelación oficial en el legado (T3). |
+| T3 | Aplicar resultado de sincronización (Sincronizador) | Transición a *confirmada*, *rechazada* o *cancelada*, solo si la inscripción sigue en el estado esperado; liberación del cupo si hubo rechazo (compensación; García-Molina y Salem, 1987); evento marcado como procesado; auditoría. | La llamada al legado ocurre **antes** de T3 y fuera de ella. Si el Sincronizador cae entre la llamada y T3, el evento sigue pendiente y se reintenta; la consulta previa de existencia en el legado evita el duplicado (QAS-03). |
+| T4 | Importar historial y oferta (Sincronizador) | Un lote de estudiantes o grupos por transacción, con su marca de vigencia. | La lectura del legado. Si falla a mitad del proceso, los lotes ya importados son válidos y el resto conserva la marca de no vigente. |
+
+**Por qué T1 garantiza C04 sin bloquear toda la tabla.** En PostgreSQL, con el nivel de aislamiento *read committed*, un `UPDATE` que encuentra una fila modificada por otra transacción en curso espera a que esta termine y **vuelve a evaluar la condición `WHERE` sobre la versión confirmada de la fila** (PostgreSQL Global Development Group, 2024, sección 13.2.1). Por eso, de 300 solicitudes concurrentes sobre un grupo con 10 cupos, exactamente 10 encuentran `inscritos < capacidad` y las demás afectan 0 filas. Como defensa adicional, la tabla declara `CHECK (inscritos <= capacidad)`, de modo que ni un error de programación podría violar C04.
+
+El bloqueo solo afecta a la fila del grupo y dura lo que dura T1, que no incluye llamadas de red externas. Se estima del orden de milisegundos, y debe medirse en la prueba de carga de la Actividad 4.
+
+**Por qué se bloquea `estudiante_periodo`.** Dos solicitudes del mismo estudiante para grupos distintos con horarios cruzados podrían validarse en paralelo y pasar ambas la regla de conflicto de horario. Bloquear la fila del estudiante al inicio de T1 ordena las solicitudes **del mismo estudiante** sin afectar a los demás.
+
+### 5.2 Reglas de dependencia
+
+| ID | Regla | Propósito |
+|---|---|---|
+| DEP-01 | El paquete `dominio` de cada módulo no depende de Spring, JPA, SQL ni de otros módulos. | Reglas de negocio aisladas y comprobables (Martin, 2017; Cockburn, 2005). |
+| DEP-02 | Un módulo solo puede usar el paquete `api` (interfaces públicas) de otro módulo; nunca sus clases internas ni sus tablas. | Encapsulamiento entre módulos (Parnas, 1972) y modificabilidad (QAS-07). |
+| DEP-03 | Solo el adaptador de integración con el legado, que se ejecuta en el Sincronizador, conoce el protocolo y el modelo del legado. Ninguna clase de la API depende de él. | Garantía estructural de QAS-01: la API no puede llamar al legado porque no tiene cómo hacerlo. |
+| DEP-04 | Las dependencias entre módulos no forman ciclos. | Permite entender, probar y modificar cada módulo de forma independiente. |
+
+Grafo de dependencias permitido entre módulos:
+
+```
+Inscripciones ──► Reglas ──► Historial
+      │             └──────► Oferta
+      ├──────────────────────► Oferta (grupos y capacidad)
+      └──────────────────────► Auditoría
+Sincronizador ──► Inscripciones (solo el caso de uso Aplicar resultado)
+Sincronizador ──► Historial, Oferta (importación)
+Sincronizador ──► Adaptador del legado (exclusivo)
+```
+
+Estas reglas se verifican automáticamente en la integración continua con pruebas de arquitectura (ArchUnit), como se define en la Actividad 5.
+
+### 5.3 Máquina de estados de la inscripción
+
+![Estados de la inscripción](diagramas/estados-inscripcion.svg)
+
+Fuente: [estados-inscripcion.puml](diagramas/estados-inscripcion.puml) · [PNG](diagramas/estados-inscripcion.png)
+
+Solo el estado *confirmada* se presenta como inscripción oficial (RES-03). Así, PIA puede operar sin el legado sin generar confirmaciones incorrectas.
+
+- Si el estudiante cancela una inscripción que todavía no se había enviado al legado, el Sincronizador descarta ambos eventos sin llamar al legado.
+- Si ya se había enviado, el Sincronizador envía también la cancelación.
+
+### 5.4 Diagrama dinámico del Escenario A
+
+![Secuencia del Escenario A](diagramas/secuencia-escenario-a.svg)
+
+Fuente: [secuencia-escenario-a.puml](diagramas/secuencia-escenario-a.puml) · [PNG](diagramas/secuencia-escenario-a.png)
+
+El diagrama muestra los tres momentos del escenario:
+1. La detección de la falla y la apertura del interruptor de circuito.
+2. Una inscripción completa durante la falla, en T1, sin interacción con el legado, incluido el reintento del estudiante que la guardia de idempotencia absorbe.
+3. La recuperación: el interruptor se cierra y la bandeja de salida se vacía, con la consulta de existencia previa para no duplicar en el legado.
+
+---
+
+## 6. Correspondencia entre drivers y estructura
+
+| Driver (prioridad) | Elementos de la estructura que lo atienden |
+|---|---|
+| QAS-02 Integridad de cupos (1) | Componente Control de cupos (actualización condicional); restricción `CHECK`; transacción T1; base de datos única como punto de consistencia. |
+| QAS-01 Disponibilidad ante falla del legado (2) | Contenedor Sincronizador separado; regla DEP-03; bandeja de salida; copia local del historial; interruptor de circuito; estados *pendiente* y *confirmada*; tabla `estado_legado` para informar al estudiante. |
+| QAS-03 No duplicación (3) | Clave de idempotencia generada por la aplicación web; Guardia de idempotencia; índice único parcial; consulta de existencia en el legado antes de registrar. |
+| QAS-04 Rendimiento (4) | Dos instancias de la API sin estado; balanceo y limitación de tasa en Nginx; consulta de estado separada de la escritura; pool de conexiones acotado. |
+| QAS-05 Recuperabilidad (5) | Réplica en espera; pgBackRest con archivado continuo. |
+| QAS-06 Seguridad y trazabilidad (6) | Proveedor de identidad (OIDC); identidad tomada del token; módulo de auditoría de solo inserción dentro de cada transacción; TLS en el proxy. |
+| QAS-07 Modificabilidad (7) | Módulo de Reglas con una clase por regla; reglas DEP-01 y DEP-02 verificadas automáticamente. |
+
+---
+
+## 7. Referencias
+
+- Brown, S. (2018). *The C4 model for visualising software architecture*. c4model.com.
+- Buschmann, F., Meunier, R., Rohnert, H., Sommerlad, P. y Stal, M. (1996). *Pattern-Oriented Software Architecture, Vol. 1: A System of Patterns*. Wiley.
+- Cockburn, A. (2005). *Hexagonal architecture (Ports and Adapters)*. alistair.cockburn.us.
+- Codd, E. F. (1970). A relational model of data for large shared data banks. *Communications of the ACM, 13*(6), 377–387.
+- Conway, M. (1968). How do committees invent? *Datamation, 14*(4), 28–31.
+- Deutsch, P. (1994). *The Eight Fallacies of Distributed Computing*. Sun Microsystems.
+- Evans, E. (2003). *Domain-Driven Design: Tackling Complexity in the Heart of Software*. Addison-Wesley.
+- García-Molina, H. y Salem, K. (1987). Sagas. *Proceedings of the ACM SIGMOD*, 249–259.
+- Haerder, T. y Reuter, A. (1983). Principles of transaction-oriented database recovery. *ACM Computing Surveys, 15*(4), 287–317.
+- Helland, P. (2012). Idempotence is not a medical condition. *ACM Queue, 10*(4).
+- Lewis, J. y Fowler, M. (2014). *Microservices*. martinfowler.com.
+- Martin, R. C. (2017). *Clean Architecture: A Craftsman's Guide to Software Structure and Design*. Prentice Hall.
+- Parnas, D. (1972). On the criteria to be used in decomposing systems into modules. *Communications of the ACM, 15*(12), 1053–1058.
+- PostgreSQL Global Development Group (2024). *PostgreSQL 16 Documentation*, cap. 13 "Concurrency Control" y cap. 26 "Backup and Restore".
+- Richardson, C. (2018). *Microservices Patterns*. Manning. Patrón *Transactional Outbox*.
