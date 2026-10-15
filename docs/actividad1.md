@@ -176,3 +176,123 @@ Cada escenario sigue la estructura de seis partes de Bass et al. (2021). El *ent
 | Entorno | En desarrollo, entre períodos de matrícula, con el equipo de C10. |
 | Respuesta | La regla se implementa como una unidad nueva dentro del módulo de reglas, con sus pruebas automatizadas, sin modificar el control de cupos ni la integración con el legado. |
 | Medida | Implementada, probada y desplegada en ≤ 5 días-persona. 0 archivos modificados fuera del módulo de reglas, verificado en la revisión de la solicitud de integración (Pull Request). 0 regresiones en la suite de pruebas automatizadas. |
+
+---
+
+## 5. Clasificación y priorización (árbol de utilidad)
+
+Cada escenario recibe un par (importancia, dificultad) en escala Alta (A), Media (M) o Baja (B) (Kazman, Klein y Clements, 2000):
+
+- **Importancia:** impacto sobre los objetivos de negocio si el escenario no se cumple.
+- **Dificultad:** riesgo técnico de lograrlo con las restricciones RES-01 a RES-04.
+
+Los escenarios (A, A) son los que más condicionan la arquitectura y se atienden primero.
+
+```
+Utilidad de PIA
+├── Fiabilidad
+│   ├── Disponibilidad ante falla del legado ........ QAS-01 (A, A)
+│   ├── No duplicación ante reintentos .............. QAS-03 (A, M)
+│   └── Recuperabilidad (RTO / RPO) ................. QAS-05 (A, M)
+├── Adecuación funcional
+│   └── Integridad de cupos bajo concurrencia ....... QAS-02 (A, A)
+├── Eficiencia de desempeño
+│   └── Consultas en el pico de matrícula ........... QAS-04 (A, M)
+├── Seguridad
+│   └── Control de acceso y trazabilidad ............ QAS-06 (A, B)
+└── Mantenibilidad
+    └── Incorporación de reglas académicas .......... QAS-07 (M, M)
+```
+
+| Prioridad | Escenario | (Imp., Dif.) | Justificación de la calificación |
+|---|---|---|---|
+| 1 | QAS-02 Integridad de cupos | (A, A) | Un sobrecupo viola C04, que la universidad exige sin excepción, y es la causa directa de OBN-01. Es difícil porque cientos de transacciones compiten por la misma fila en el mismo instante. |
+| 2 | QAS-01 Disponibilidad ante falla del legado (Escenario A) | (A, A) | Sin desacoplamiento, C03 es imposible de cumplir (sección 4.1). Es difícil porque obliga a operar sin la fuente oficial de prerrequisitos sin producir confirmaciones incorrectas. |
+| 3 | QAS-03 No duplicación | (A, M) | Los duplicados son un problema explícito del caso y se agravan con la retransmisión hacia el legado tras una falla. Dificultad media: hay mecanismos conocidos (claves de idempotencia y unicidad en la base de datos). |
+| 4 | QAS-04 Rendimiento de consultas | (A, M) | La lentitud es un problema explícito y C02 fija la medida. Dificultad media: 1.200 usuarios es una carga moderada para PostgreSQL con lecturas optimizadas. |
+| 5 | QAS-05 Recuperabilidad | (A, M) | Una pérdida de datos de inscripción sería grave, pero C06 y C07 se pueden cumplir con capacidades nativas de PostgreSQL (réplica y archivado del registro de transacciones). Exige procedimientos y simulacros. |
+| 6 | QAS-06 Seguridad y trazabilidad | (A, B) | Es obligación legal (RES-04), pero se resuelve con técnicas estándar: autenticación institucional, autorización por rol y tabla de auditoría de solo inserción. |
+| 7 | QAS-07 Modificabilidad | (M, M) | Aporta a OBN-03, pero su incumplimiento no detiene la matrícula. Depende de una buena modularización y de la disciplina del equipo. |
+
+---
+
+## 6. Conflictos entre drivers y su resolución
+
+Un punto de compromiso es una decisión que afecta a dos o más atributos de calidad en direcciones opuestas (Kazman et al., 2000).
+
+### CF-01 — Consistencia frente a disponibilidad ante la falla del legado
+
+- **Drivers en conflicto:**
+  - DQ-02, DQ-03 y RES-03 exigen consistencia: no sobrecupos, no duplicados y que el legado sea la fuente oficial de prerrequisitos.
+  - DQ-01 exige disponibilidad: 99,9 % aunque el legado falle 40 minutos.
+- **Naturaleza del conflicto:** el teorema CAP establece que, ante una partición de red, un sistema distribuido elige entre consistencia y disponibilidad (Brewer, 2000; Gilbert y Lynch, 2002). La caída del legado funciona como esa partición.
+  - Si PIA confirma inscripciones sin verificar prerrequisitos, conserva la disponibilidad pero produce confirmaciones incorrectas.
+  - Si bloquea todas las inscripciones, conserva la consistencia pero pierde 40 de los 43,2 minutos del presupuesto de C03.
+- **Resolución:** separar dos tipos de consistencia según el dueño del dato. Abadi (2012), con el modelo PACELC, sustenta que se elija distinto según el dato y la situación.
+  1. Los **cupos** son datos que PIA administra por completo. Se mantienen con *consistencia fuerte* mediante transacciones locales en PostgreSQL, y la caída del legado no los afecta.
+  2. Los **prerrequisitos y el registro oficial** pertenecen al legado. Se validan contra una copia local del historial y se reconcilian con *consistencia eventual*, mediante estados explícitos (*pendiente de sincronización* y luego *confirmada*). Así nunca se presenta como oficial algo que el legado no ha registrado.
+
+### CF-02 — Rendimiento de consultas frente a consistencia de cupos
+
+- **Drivers en conflicto:** DQ-04 (95 % de las consultas en ≤ 2 s con 1.200 usuarios) frente a DQ-02 (cupos exactos).
+- **Naturaleza del conflicto:** mostrar el cupo exacto en cada consulta obligaría a leer filas que están siendo bloqueadas y actualizadas por las inscripciones en curso. La lectura y la escritura competirían por los mismos recursos y se degradaría el tiempo de respuesta.
+- **Resolución:** separar el camino de lectura del de escritura, siguiendo el principio de segregación de responsabilidades de comando y consulta (CQRS) (Fowler, 2011).
+  - La **consulta** muestra un cupo informativo que puede tener unos segundos de antigüedad, servido desde lecturas optimizadas o una caché de corta duración.
+  - La **inscripción** valida y descuenta el cupo de forma atómica en la transacción que la confirma.
+  - La consistencia estricta se exige solo en el momento de escribir, que es donde C04 lo requiere.
+
+### CF-03 — Capacidad de aislamiento frente a capacidad del equipo
+
+- **Drivers en conflicto:** DQ-01 y DQ-07 favorecen aislar componentes para contener fallas y cambios. RES-02 (cuatro desarrolladores y un administrador) y RES-01 (sin servicios comerciales) limitan cuánta infraestructura distribuida se puede operar.
+- **Naturaleza del conflicto:** una arquitectura de microservicios aislaría fallas y cambios, pero multiplica las unidades desplegables, las bases de datos y la infraestructura de mensajería que el equipo debe operar. Además, cada frontera de red añade latencia y fallos parciales (Deutsch, 1994). La ley de Conway (Conway, 1968) indica que la estructura del sistema tiende a reflejar la de la organización que lo mantiene.
+- **Resolución:** obtener el aislamiento mediante *módulos con fronteras explícitas dentro de una misma unidad desplegable* (Parnas, 1972), y aislar en un proceso aparte solo lo que tiene un perfil de fallo distinto: la integración con el legado. La decisión se desarrolla en la Actividad 2 y en el ADR de estilo arquitectónico.
+
+### CF-04 — Trazabilidad frente a rendimiento
+
+- **Drivers en conflicto:** DQ-06 (registrar el 100 % de las operaciones) frente a DQ-04 y DQ-02 (latencia y transacciones cortas).
+- **Naturaleza del conflicto:**
+  - Escribir la auditoría en un sistema externo dentro de cada inscripción alarga la transacción y añade un punto de falla.
+  - Escribirla fuera de la transacción puede dejar operaciones sin registro.
+- **Resolución:** registrar la auditoría como una inserción en una tabla de solo inserción de la misma base de datos y en la *misma transacción local* de la operación. El costo es una escritura adicional sin coordinación distribuida, y la operación y su registro quedan confirmados o anulados juntos (atomicidad; Haerder y Reuter, 1983).
+
+---
+
+## 7. Matriz consolidada de drivers
+
+Prioridades: A = Alta, M = Media, B = Baja. Las restricciones son obligatorias, no negociables.
+
+| ID | Tipo | Descripción | Origen | Prioridad | Medida de aceptación | Justificación |
+|---|---|---|---|---|---|---|
+| OBN-01 | Objetivo de negocio | Integridad de la matrícula: una inscripción por estudiante y grupo, sin sobrecupos. | Problemas de duplicados y cupos | Alta | 0 sobrecupos y 0 duplicados por período. | Es el origen directo de DQ-02 y DQ-03 y de los problemas más visibles del caso. |
+| OBN-02 | Objetivo de negocio | Continuidad de la matrícula aunque fallen sistemas dependientes. | Problemas de disponibilidad; C03, C05 | Alta | Disponibilidad ≥ 99,9 % durante la matrícula. | Una matrícula interrumpida afecta a 24.000 estudiantes y al calendario académico. |
+| OBN-03 | Objetivo de negocio | Menor costo de incorporar reglas académicas. | Problema de esfuerzo técnico; C10 | Media | Regla nueva sin modificar cupos ni integración. | Mejora la agilidad institucional, pero no detiene la operación si se demora. |
+| OBN-04 | Objetivo de negocio | Trazabilidad para reclamaciones y cumplimiento legal. | Problema de auditoría; C09 | Alta | 100 % de las operaciones auditadas. | Obligación legal (Ley 1581 de 2012) y necesidad para resolver disputas. |
+| DQ-02 | Atributo de calidad | Integridad de cupos bajo concurrencia. | C04, C01 | A (A, A) | Inscritos ≤ capacidad en el 100 % de las pruebas; 0 sobrecupos en la conciliación (QAS-02). | C04 no admite excepciones y el conflicto por la misma fila es técnicamente exigente. |
+| DQ-01 | Atributo de calidad | Disponibilidad tolerante a la falla del legado (Escenario A). | C03, C05, RES-03 | A (A, A) | 0 min de indisponibilidad por falla del legado; detección ≤ 30 s; sincronización ≤ 15 min sin duplicados (QAS-01). | Sin desacoplamiento C03 es matemáticamente imposible (sección 4.1). |
+| DQ-03 | Atributo de calidad | No duplicación ante reintentos. | Problema de duplicados; condición adicional | A (A, M) | 0 duplicados en PIA y en el legado; 1 cupo por estudiante–grupo–período (QAS-03). | Problema explícito del caso, agravado por la retransmisión hacia el legado. |
+| DQ-04 | Atributo de calidad | Rendimiento de consultas en el pico. | C01, C02 | A (A, M) | p95 ≤ 2 s y errores < 1 % con 1.200 usuarios durante 15 min (QAS-04). | La lentitud es un problema explícito; C02 fija una medida concreta. |
+| DQ-05 | Atributo de calidad | Recuperabilidad ante falla propia. | C06, C07 | A (A, M) | RTO ≤ 30 min y RPO ≤ 5 min en simulacro (QAS-05). | Protege la información de inscripción; se logra con capacidades nativas de PostgreSQL. |
+| DQ-06 | Atributo de calidad | Seguridad y trazabilidad. | C09, RES-04 | A (A, B) | 100 % operaciones auditadas; 100 % accesos no autorizados negados y registrados (QAS-06). | Obligación legal resuelta con técnicas estándar. |
+| DQ-07 | Atributo de calidad | Modificabilidad de reglas académicas. | Problema de esfuerzo técnico; C10 | M (M, M) | ≤ 5 días-persona; 0 cambios fuera del módulo de reglas (QAS-07). | Aporta a OBN-03; depende de la modularización. |
+| RES-01 | Restricción | Linux y PostgreSQL, sin servicios comerciales. | C08 | Obligatoria | Ningún componente con licencia o servicio comercial en la arquitectura. | Decisión institucional de plataforma y costos. |
+| RES-02 | Restricción | Equipo de 4 desarrolladores y 1 administrador. | C10 | Obligatoria | La operación de la solución no exige más perfiles ni turnos de los disponibles. | Capacidad institucional fija. |
+| RES-03 | Restricción | El legado es la fuente oficial del historial y los prerrequisitos. | Condición adicional | Obligatoria | Una inscripción solo se muestra como *confirmada* después de registrarse en el legado. | Decisión institucional de no reemplazar el legado. |
+| RES-04 | Restricción | Protección de datos académicos y personales. | C09; Ley 1581 de 2012 | Obligatoria | Acceso autenticado y autorizado al 100 % de las operaciones; datos cifrados en tránsito. | Obligación legal. |
+
+---
+
+## 8. Referencias
+
+- Abadi, D. (2012). Consistency tradeoffs in modern distributed database system design. *IEEE Computer, 45*(2), 37–42.
+- Bass, L., Clements, P. y Kazman, R. (2021). *Software Architecture in Practice* (4.ª ed.). Addison-Wesley.
+- Brewer, E. (2000). Towards robust distributed systems. Conferencia magistral, *ACM Symposium on Principles of Distributed Computing (PODC)*.
+- Cervantes, H. y Kazman, R. (2016). *Designing Software Architectures: A Practical Approach*. Addison-Wesley.
+- Congreso de Colombia (2012). Ley Estatutaria 1581 de 2012, por la cual se dictan disposiciones generales para la protección de datos personales.
+- Conway, M. (1968). How do committees invent? *Datamation, 14*(4), 28–31.
+- Deutsch, P. (1994). *The Eight Fallacies of Distributed Computing*. Sun Microsystems.
+- Fowler, M. (2011). *CQRS*. martinfowler.com.
+- Gilbert, S. y Lynch, N. (2002). Brewer's conjecture and the feasibility of consistent, available, partition-tolerant web services. *ACM SIGACT News, 33*(2), 51–59.
+- Haerder, T. y Reuter, A. (1983). Principles of transaction-oriented database recovery. *ACM Computing Surveys, 15*(4), 287–317.
+- ISO/IEC 25010:2023. *Systems and software engineering — Systems and software Quality Requirements and Evaluation (SQuaRE) — Product quality model*.
+- Kazman, R., Klein, M. y Clements, P. (2000). *ATAM: Method for Architecture Evaluation* (CMU/SEI-2000-TR-004). Software Engineering Institute.
+- Parnas, D. (1972). On the criteria to be used in decomposing systems into modules. *Communications of the ACM, 15*(12), 1053–1058.
