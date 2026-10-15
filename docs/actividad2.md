@@ -140,3 +140,47 @@ Durante los 40 minutos sin legado:
 2. La API **no cambia su funcionamiento**: sigue validando contra la copia local del historial, descontando cupos en PostgreSQL y dejando eventos en la bandeja de salida. Como lee `estado_legado`, informa al estudiante: "Tu inscripción está registrada y reservada; será oficial cuando se sincronice con el sistema académico".
 3. Solo se restringen las inscripciones de estudiantes cuya copia del historial está marcada como no vigente (SUP-02). Se rechazan con un mensaje explícito y sin consumir cupo.
 4. Cuando el legado responde a la prueba, el interruptor se cierra y el Sincronizador vacía la bandeja de salida en orden de llegada, con un ritmo limitado para no saturar al legado recién recuperado.
+
+---
+
+## 4. Nivel 3: componentes del módulo de Inscripciones y control de cupos
+
+![Diagrama de componentes C4](diagramas/c4-nivel3-componentes-inscripciones.svg)
+
+Fuente: [c4-nivel3-componentes-inscripciones.puml](diagramas/c4-nivel3-componentes-inscripciones.puml) · [PNG](diagramas/c4-nivel3-componentes-inscripciones.png)
+
+### 4.1 Organización hexagonal del módulo
+
+El módulo se organiza en tres anillos (Cockburn, 2005):
+
+- **Dominio:** el agregado Inscripción con su máquina de estados e invariantes. No depende de Spring, de SQL ni de ningún otro módulo.
+- **Aplicación:** los casos de uso, que definen los límites transaccionales y declaran los **puertos** que necesitan: control de cupos, repositorio, publicador de eventos, reglas, historial y auditoría.
+- **Adaptadores:** el controlador REST (entrada) y las implementaciones SQL o JPA de los puertos (salida).
+
+Así, cambiar el mecanismo de persistencia o el protocolo de entrada no altera las reglas del dominio. El caso de uso puede probarse con implementaciones en memoria de los puertos.
+
+### 4.2 Responsabilidades y justificación de cada componente
+
+| Componente | Responsabilidad | Driver | Justificación de su existencia |
+|---|---|---|---|
+| Controlador REST de inscripciones | Recibir solicitudes, obtener la identidad del estudiante desde el token (nunca del cuerpo de la solicitud), exigir `Idempotency-Key` y traducir resultados a códigos HTTP: 201 inscrita, 409 sin cupo o duplicada, 422 regla incumplida, 503 historial no vigente. | QAS-03, QAS-06 | Aísla el protocolo HTTP del dominio. Tomar la identidad del token impide que un estudiante opere a nombre de otro. |
+| Guardia de idempotencia | Insertar la clave en `integracion.idempotencia` (clave primaria = clave + estudiante) **dentro de la transacción del caso de uso**. Si la clave ya existe, devolver la respuesta almacenada. | QAS-03 | Convierte cualquier cantidad de repeticiones de una solicitud en un solo efecto (Helland, 2012). Al compartir la transacción, no puede quedar una clave registrada sin su operación, ni al revés. |
+| Caso de uso Inscribir asignatura | Orquestar en una transacción: bloquear la fila `estudiante_periodo` del solicitante, validar reglas, descontar el cupo, crear la inscripción, publicar el evento y auditar. | QAS-02, QAS-01, QAS-06 | Es el límite transaccional T1 (sección 5). Concentrar la orquestación aquí evita que la lógica de consistencia quede repartida. |
+| Caso de uso Cancelar inscripción | Validar fechas, aplicar la transición de estado, liberar el cupo, publicar el evento y auditar. | QAS-02, RFP-04 | Es el límite transaccional T2. Libera el cupo en el mismo instante en que se cancela. |
+| Caso de uso Aplicar resultado de sincronización | Recibir del Sincronizador la respuesta del legado y aplicar la transición: *confirmada* o *rechazada*, con liberación de cupo como compensación. Solo actúa si la inscripción sigue en el estado esperado. | QAS-01, RES-03 | Es el límite transaccional T3. Mantiene en el dominio de inscripciones, y no en el Sincronizador, la decisión sobre el estado. |
+| Consulta de estado | Devolver las inscripciones del estudiante con su estado y el estado actual del legado. | QAS-04, QAS-01 | Separa la lectura de la escritura (CF-02), sin bloqueos, y es el canal que informa al estudiante durante la falla. |
+| Agregado Inscripción | Encapsular los estados (diagrama de la sección 5.3) e impedir transiciones inválidas, por ejemplo confirmar una inscripción cancelada. | QAS-02, QAS-07 | Concentra las invariantes del dominio en un solo lugar verificable con pruebas unitarias (Evans, 2003). |
+| Control de cupos | Descontar el cupo con la actualización condicional `UPDATE grupo SET inscritos = inscritos + 1 WHERE id = ? AND inscritos < capacidad`. Si afecta 0 filas, no hay cupo. Liberar con la operación inversa. | QAS-02 | Es el único componente que modifica `inscritos`, de modo que C04 se garantiza en un solo punto. |
+| Repositorio de inscripciones | Persistir el agregado. La base de datos declara un índice único parcial sobre `(estudiante, asignatura, período)` para inscripciones activas. | QAS-03, QAS-02 | La unicidad la garantiza la base de datos, no solo el código: aunque fallara la guardia de idempotencia, no podría existir una segunda inscripción activa (Codd, 1970). |
+| Publicador de eventos de integración | Insertar en `integracion.outbox` el evento que el Sincronizador enviará al legado, en la misma transacción. | QAS-01, QAS-03 | Bandeja de salida transaccional (Richardson, 2018): si la inscripción se confirma en PIA, su evento existe; si se anula, tampoco existe el evento. |
+
+### 4.3 Módulos relacionados
+
+Se muestran como cajas en el diagrama porque el módulo de inscripciones los usa, pero cada uno es un módulo propio de la API.
+
+| Módulo | Responsabilidad | Cómo lo usa Inscripciones | Driver |
+|---|---|---|---|
+| Reglas académicas | Evaluar prerrequisitos, conflictos de horario, límite de créditos y fechas del período. Cada regla es una clase independiente que implementa una interfaz común; la evaluación aplica todas las reglas activas. | A través del puerto `ValidadorReglas`; recibe un resultado con la lista de reglas incumplidas. | QAS-07: una regla nueva es una clase nueva en este módulo, sin cambios en Inscripciones. |
+| Historial académico (copia) | Mantener la copia local, de solo lectura, del historial importado del legado, con marca de vigencia por estudiante. | Indirectamente, mediante Reglas. | QAS-01: permite validar prerrequisitos sin el legado. |
+| Oferta académica | Grupos, horarios y capacidad autorizada del período. Los cambios de capacidad los hace el funcionario de registro y quedan auditados. | Indirectamente, mediante Reglas (horarios y créditos). El control de cupos usa la tabla de grupos. | QAS-02, QAS-04 |
+| Auditoría | Insertar registros en una tabla de solo inserción. El usuario de base de datos de la aplicación no tiene permisos de UPDATE ni DELETE sobre ella. | A través del puerto `RegistradorAuditoria`, dentro de la transacción del caso de uso. | QAS-06 (CF-04) |
