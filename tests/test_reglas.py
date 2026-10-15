@@ -68,3 +68,26 @@ def test_r4_detecta_diagrama_sin_exportar(tmp_path):
     (tmp_path / "nuevo.svg").write_text("<svg/>", encoding="utf-8")
     errores = vr.verificar_diagramas(tmp_path)
     assert errores == ["R4 [nuevo.puml] falta la exportación nuevo.png."]
+
+
+ADR_002 = (RAIZ / "docs/actividad3/ADR-002-consistencia-cupos-inscripciones.md").read_text(encoding="utf-8")
+NIVEL3 = (RAIZ / "docs/diagramas/c4-nivel3-componentes-inscripciones.puml").read_text(encoding="utf-8")
+
+
+def test_r5_acepta_la_decision_vigente_de_cupos():
+    assert vr.verificar_integridad_cupos(ADR_002, NIVEL3) == []
+
+
+def test_r5_detecta_que_se_debilita_la_restriccion_de_cupo():
+    alterado = ADR_002.replace("CHECK (inscritos <= capacidad)", "CHECK (inscritos >= 0)")
+    assert any("CHECK" in e for e in vr.verificar_integridad_cupos(alterado, NIVEL3))
+
+
+def test_r5_detecta_adr_de_cupos_rechazado():
+    alterado = ADR_002.replace("| Estado | Aceptado |", "| Estado | Rechazado |")
+    assert any("Aceptada" in e for e in vr.verificar_integridad_cupos(alterado, NIVEL3))
+
+
+def test_r5_detecta_que_desaparece_el_control_de_cupos():
+    alterado = NIVEL3.replace('"Control de cupos"', '"Gestor genérico"')
+    assert any("Control de cupos" in e for e in vr.verificar_integridad_cupos(ADR_002, alterado))

@@ -21,7 +21,7 @@ El modelo que se propone es **liviano y automatizado**, proporcional al equipo i
 |---|---|---|---|---|---|
 | **POL-01** | **Aislamiento del legado.** Solo el Sincronizador y su adaptador anticorrupción se comunican con el sistema legado. Ningún componente que atienda solicitudes de usuario puede depender del legado. | ADR-003, DEP-03, QAS-01 (Escenario A) | El script `scripts/verificar_reglas.py` (regla R1) analiza los modelos C4 (`docs/diagramas/c4-*.puml`) y falla si existe una relación con el legado cuyo origen no sea el Sincronizador o, en el diagrama de contexto, el sistema PIA completo. | Prueba ArchUnit: ninguna clase de los paquetes `..api..`, `..inscripciones..`, `..oferta..` o `..reglas..` puede depender de `..integracion.legado..` (sección 5.3). | Líder técnico |
 | **POL-02** | **Fronteras de módulo.** (a) El paquete `dominio` de cada módulo no depende de Spring, JPA ni de otros módulos. (b) Un módulo solo usa el paquete `api` de otro módulo. (c) No hay ciclos entre módulos. | ADR-001, DEP-01, DEP-02, DEP-04, QAS-07 | Revisión del diagrama de componentes en la solicitud de integración. | Pruebas ArchUnit de capas, de acceso entre paquetes y `slices().beFreeOfCycles()` (sección 5.3). | Líder técnico |
-| **POL-03** | **Integridad de cupos protegida.** (a) La restricción `ck_cupo` (`inscritos <= capacidad`) y el índice único de inscripciones activas existen siempre en el esquema. (b) Solo el componente Control de cupos modifica `inscritos`. (c) La prueba de concurrencia V-03.1 (300 solicitudes sobre 10 cupos) es obligatoria y bloqueante. | ADR-002, TAC-03, QAS-02, C04 | Regla de documentación: el ADR-002 debe permanecer en estado *Aceptado* mientras no exista un ADR que lo reemplace (regla R2). | Prueba de integración que inspecciona el catálogo de PostgreSQL (`pg_constraint`) y falla si `ck_cupo` no existe; prueba ArchUnit sobre escrituras de `inscritos`; prueba V-03.1 en la integración continua. | Líder técnico y administrador de infraestructura (migraciones) |
+| **POL-03** | **Integridad de cupos protegida.** (a) La restricción `ck_cupo` (`inscritos <= capacidad`) y el índice único de inscripciones activas existen siempre en el esquema. (b) Solo el componente Control de cupos modifica `inscritos`. (c) La prueba de concurrencia V-03.1 (300 solicitudes sobre 10 cupos) es obligatoria y bloqueante. | ADR-002, TAC-03, QAS-02, C04 | Script `verificar_reglas.py` (regla R5): falla si el ADR-002 deja de estar *Aceptado* sin haber sido reemplazado, si desaparece la restricción `CHECK (inscritos <= capacidad)` o si el modelo de componentes pierde el componente Control de cupos. | Prueba de integración que inspecciona el catálogo de PostgreSQL (`pg_constraint`) y falla si `ck_cupo` no existe; prueba ArchUnit sobre escrituras de `inscritos`; prueba V-03.1 en la integración continua. | Líder técnico y administrador de infraestructura (migraciones) |
 | **POL-04** | **Decisiones y diagramas versionados.** Toda decisión significativa (sección 3.2) tiene un ADR con la estructura de la plantilla. Todo diagrama tiene su fuente `.puml` y sus versiones SVG y PNG. Todo documento de actividad empieza con el nombre y documento del autor. | Actividad 3, Actividad 2, enunciado | Script `verificar_reglas.py` (reglas R2, R3 y R4) y prueba de compilación de los diagramas en la integración continua. | Igual. | Autor del cambio y líder técnico |
 
 ---
@@ -113,7 +113,7 @@ Los controles están implementados y se ejecutan con GitHub Actions en cada `pus
 
 | Control | Archivo | Qué verifica | Política |
 |---|---|---|---|
-| **Control 1. Verificación de reglas arquitectónicas** | [`.github/workflows/verificacion-arquitectura.yml`](../.github/workflows/verificacion-arquitectura.yml) → [`scripts/verificar_reglas.py`](../scripts/verificar_reglas.py) | R1: ningún elemento distinto del Sincronizador se relaciona con el legado en los modelos C4. R2: estructura y estado de los ADR. R3: nombre y documento en cada entregable. R4: cada `.puml` tiene sus versiones SVG y PNG. | POL-01, POL-04 |
+| **Control 1. Verificación de reglas arquitectónicas** | [`.github/workflows/verificacion-arquitectura.yml`](../.github/workflows/verificacion-arquitectura.yml) → [`scripts/verificar_reglas.py`](../scripts/verificar_reglas.py) | R1: ningún elemento distinto del Sincronizador se relaciona con el legado en los modelos C4. R2: estructura y estado de los ADR. R3: nombre y documento en cada entregable. R4: cada `.puml` tiene sus versiones SVG y PNG. R5: siguen vigentes la decisión, la restricción de capacidad y el componente que protegen C04. | POL-01, POL-03, POL-04 |
 | **Control 2. Pruebas automatizadas** | [`.github/workflows/pruebas-automatizadas.yml`](../.github/workflows/pruebas-automatizadas.yml) → [`tests/`](../tests/) | Pruebas unitarias del verificador, con casos positivos y negativos (por ejemplo, que detecte una relación `API → legado`). Pruebas de integridad de la documentación: enlaces e imágenes existentes, entregables mínimos y los tres niveles C4. Compilación de todos los diagramas PlantUML. | POL-01, POL-04 |
 
 ### 5.1 Control 1: la regla arquitectónica como función de aptitud
@@ -135,8 +135,8 @@ La prueba `test_r1_rechaza_que_la_api_llame_al_legado` garantiza que el verifica
 
 ### 5.2 Control 2: pruebas automatizadas
 
-`pytest` ejecuta 23 pruebas en la versión actual:
-- 9 sobre las reglas;
+`pytest` ejecuta 27 pruebas en la versión actual:
+- 13 sobre las reglas R1 a R5, con casos que deben pasar y casos que deben fallar;
 - 14 sobre la documentación: una por cada documento Markdown, que comprueba sus enlaces e imágenes, más las de entregables mínimos y niveles C4.
 
 El número crece automáticamente con cada documento nuevo.
@@ -174,7 +174,7 @@ class ReglasArquitectura {
 ### 5.4 Configuración de la rama protegida
 
 Para que los controles **impidan** integrar un cambio, y no solo lo informen, la rama principal se configura en GitHub, en *Settings → Branches → Branch protection rules*:
-- verificaciones obligatorias `Reglas R1-R4`, `Pruebas de reglas y de documentación` y `Compilación de los diagramas PlantUML`;
+- verificaciones obligatorias `Reglas R1-R5`, `Pruebas de reglas y de documentación` y `Compilación de los diagramas PlantUML`;
 - al menos 1 aprobación;
 - revisión de los propietarios de código ([`CODEOWNERS`](../.github/CODEOWNERS)) en las rutas protegidas;
 - prohibición de `push` directo.
@@ -222,7 +222,7 @@ La deuda técnica es el costo futuro de un atajo tomado hoy (Cunningham, 1992); 
 
 | # | Criterio | Cómo se comprueba |
 |---|---|---|
-| A1 | Las tres verificaciones automáticas están en verde: reglas R1-R4, pruebas automatizadas y compilación de los diagramas. Cuando exista código, también `mvn verify` con ArchUnit y las pruebas de integración. | Automático (rama protegida) |
+| A1 | Las tres verificaciones automáticas están en verde: reglas R1-R5, pruebas automatizadas y compilación de los diagramas. Cuando exista código, también `mvn verify` con ArchUnit y las pruebas de integración. | Automático (rama protegida) |
 | A2 | Tiene al menos 1 aprobación de un desarrollador distinto del autor. | Automático (rama protegida) |
 | A3 | Si modifica rutas protegidas (`CODEOWNERS`), tiene la aprobación del líder técnico; si afecta infraestructura, también la del administrador. | Automático (`CODEOWNERS`) |
 | A4 | Si es un cambio significativo (sección 3.2), incluye o referencia un ADR en estado `Aceptado`. | Revisión con la plantilla de la solicitud |

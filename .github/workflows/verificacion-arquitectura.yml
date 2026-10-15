@@ -7,7 +7,7 @@ on:
 
 jobs:
   reglas:
-    name: Reglas R1-R4 (aislamiento del legado, ADR, encabezados, diagramas)
+    name: Reglas R1-R5 (legado, ADR, encabezados, diagramas, cupos)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

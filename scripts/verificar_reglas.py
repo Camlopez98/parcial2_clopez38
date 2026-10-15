@@ -7,6 +7,10 @@ Reglas:
   R2 (POL-04): cada ADR contiene las secciones obligatorias y un estado válido.
   R3 (POL-04): cada documento de actividad y cada ADR empieza con nombre y documento.
   R4 (POL-04): cada diagrama .puml tiene sus versiones .svg y .png.
+  R5 (POL-03): la decisión de integridad de cupos sigue vigente: el ADR-002 está
+      Aceptado (o Reemplazado por otro ADR), conserva la restricción
+      CHECK (inscritos <= capacidad) y el modelo de componentes mantiene el
+      componente "Control de cupos" como único responsable del cupo.
 
 Uso: python scripts/verificar_reglas.py [raiz_del_repositorio]
 Termina con código 1 si encuentra incumplimientos.
@@ -89,6 +93,22 @@ def verificar_diagramas(directorio: Path) -> list[str]:
     return errores
 
 
+def verificar_integridad_cupos(adr: str, componentes: str) -> list[str]:
+    """R5: la decisión y el componente que protegen C04 siguen presentes."""
+    errores = []
+    estado = re.search(r"\|\s*Estado\s*\|\s*([^|\n]+)\|", adr)
+    if not estado or not estado.group(1).strip().startswith(("Aceptado", "Reemplazado")):
+        errores.append("R5 [ADR-002] la decisión de consistencia de cupos debe estar Aceptada "
+                       "o Reemplazada por otro ADR (POL-03).")
+    if "CHECK (inscritos <= capacidad)" not in adr:
+        errores.append("R5 [ADR-002] se eliminó la restricción CHECK (inscritos <= capacidad) (POL-03).")
+    etiquetas = [e.lower() for m, _, e in DECLARACION.findall(componentes) if m == "Component"]
+    if "control de cupos" not in etiquetas:
+        errores.append("R5 [c4-nivel3] el modelo de componentes ya no tiene el componente "
+                       "'Control de cupos' (POL-03).")
+    return errores
+
+
 def verificar_repositorio(raiz: Path) -> list[str]:
     docs = raiz / "docs"
     errores: list[str] = []
@@ -103,6 +123,13 @@ def verificar_repositorio(raiz: Path) -> list[str]:
     for actividad in sorted(docs.glob("actividad*.md")):
         errores += verificar_encabezado(actividad.read_text(encoding="utf-8"), actividad.name)
     errores += verificar_diagramas(docs / "diagramas")
+    adr_cupos = sorted((docs / "actividad3").glob("ADR-002-*.md"))
+    nivel3 = docs / "diagramas" / "c4-nivel3-componentes-inscripciones.puml"
+    if not adr_cupos or not nivel3.exists():
+        errores.append("R5 falta el ADR-002 o el diagrama de componentes c4-nivel3 (POL-03).")
+    else:
+        errores += verificar_integridad_cupos(adr_cupos[0].read_text(encoding="utf-8"),
+                                              nivel3.read_text(encoding="utf-8"))
     return errores
 
 
@@ -114,7 +141,7 @@ def main() -> int:
         for error in errores:
             print(f"  - {error}")
         return 1
-    print("Reglas arquitectónicas R1-R4 verificadas: 0 incumplimientos.")
+    print("Reglas arquitectónicas R1-R5 verificadas: 0 incumplimientos.")
     return 0
 
 

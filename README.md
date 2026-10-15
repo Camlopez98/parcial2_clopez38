@@ -32,7 +32,7 @@ La Universidad de La Salle (24.000 estudiantes) necesita reemplazar el proceso d
 |---|---|---|
 | 1. Drivers arquitectónicos | [docs/actividad1.md](docs/actividad1.md) | Objetivos de negocio, restricciones y supuestos, 7 escenarios de calidad con medidas, árbol de utilidad, 4 conflictos entre drivers y matriz consolidada. |
 | 2. Estructura arquitectónica (C4) | [docs/actividad2.md](docs/actividad2.md) y [docs/diagramas/](docs/diagramas/) | Selección del estilo; diagramas de contexto, contenedores y componentes; límites transaccionales; reglas de dependencia; máquina de estados y diagrama dinámico del Escenario A. |
-| 3. Registros de decisiones (ADR) | [docs/actividad3/](docs/actividad3/) | ADR-001 a ADR-004. |
+| 3. Registros de decisiones (ADR) | [docs/actividad3/](docs/actividad3/) | ADR-001 (estilo), ADR-002 (consistencia de cupos), ADR-003 (integración y fallas del legado) y ADR-004 (decisión adicional ligada a QAS-01, de alta prioridad). El enunciado pide tres ADR y enumera cuatro temas; se entrega un archivo independiente por tema. |
 | 4. Tácticas arquitectónicas | [docs/actividad4.md](docs/actividad4.md) | 5 tácticas con alcance y verificación numérica, y plan de verificación por ambiente. |
 | 5. Gobernanza de arquitectura | [docs/actividad5.md](docs/actividad5.md) y [docs/gobernanza/](docs/gobernanza/) | Políticas verificables, responsables, procedimiento de ADR, controles automáticos, excepciones, deuda técnica y criterios de aceptación de solicitudes de integración. |
 
@@ -57,7 +57,7 @@ La Universidad de La Salle (24.000 estudiantes) necesita reemplazar el proceso d
 ## Verificación local
 
 ```bash
-python scripts/verificar_reglas.py   # reglas arquitectónicas R1-R4
+python scripts/verificar_reglas.py   # reglas arquitectónicas R1-R5
 pip install pytest && python -m pytest -v   # pruebas automatizadas
 ```
 
