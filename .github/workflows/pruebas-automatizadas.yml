@@ -1,0 +1,34 @@
+# Control automático 2 (Actividad 5): ejecuta las pruebas automatizadas del repositorio.
+name: Pruebas automatizadas
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pruebas:
+    name: Pruebas de reglas y de documentación (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias de prueba
+        run: pip install pytest==8.3.3
+      - name: Ejecutar pruebas
+        run: python -m pytest -v
+
+  diagramas:
+    name: Compilación de los diagramas PlantUML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Descargar PlantUML 1.2024.7
+        run: curl -sSL -o plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2024.7/plantuml-1.2024.7.jar
+      - name: Verificar que todos los diagramas compilan
+        run: java -jar plantuml.jar -checkonly -failfast2 docs/diagramas/*.puml

@@ -1,0 +1,18 @@
+# Control automático 1 (Actividad 5): verifica las reglas arquitectónicas POL-01 y POL-04.
+name: Verificación de reglas arquitectónicas
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  reglas:
+    name: Reglas R1-R4 (aislamiento del legado, ADR, encabezados, diagramas)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verificar reglas arquitectónicas
+        run: python scripts/verificar_reglas.py

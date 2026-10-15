@@ -104,3 +104,164 @@ El resultado es un acta en `docs/gobernanza/revisiones/<período>.md` con las de
 - Lehman, M. M. (1980). Programs, life cycles, and laws of software evolution. *Proceedings of the IEEE, 68*(9), 1060–1076.
 - Nygard, M. (2011). *Documenting Architecture Decisions*. cognitect.com.
 - Popper, K. (1959). *The Logic of Scientific Discovery*. Hutchinson.
+
+---
+
+## 5. Mecanismos de control automático integrados al repositorio
+
+Los controles están implementados y se ejecutan con GitHub Actions en cada `push` y en cada solicitud de integración. Sus resultados se ven en la pestaña **Actions** del repositorio y como verificaciones dentro de cada solicitud.
+
+| Control | Archivo | Qué verifica | Política |
+|---|---|---|---|
+| **Control 1. Verificación de reglas arquitectónicas** | [`.github/workflows/verificacion-arquitectura.yml`](../.github/workflows/verificacion-arquitectura.yml) → [`scripts/verificar_reglas.py`](../scripts/verificar_reglas.py) | R1: ningún elemento distinto del Sincronizador se relaciona con el legado en los modelos C4. R2: estructura y estado de los ADR. R3: nombre y documento en cada entregable. R4: cada `.puml` tiene sus versiones SVG y PNG. | POL-01, POL-04 |
+| **Control 2. Pruebas automatizadas** | [`.github/workflows/pruebas-automatizadas.yml`](../.github/workflows/pruebas-automatizadas.yml) → [`tests/`](../tests/) | Pruebas unitarias del verificador, con casos positivos y negativos (por ejemplo, que detecte una relación `API → legado`). Pruebas de integridad de la documentación: enlaces e imágenes existentes, entregables mínimos y los tres niveles C4. Compilación de todos los diagramas PlantUML. | POL-01, POL-04 |
+
+### 5.1 Control 1: la regla arquitectónica como función de aptitud
+
+La regla R1 convierte la política POL-01 (que surge del Escenario A y del ADR-003) en una verificación ejecutable sobre el modelo de arquitectura:
+1. El script lee las fuentes C4.
+2. Identifica el elemento externo cuyo nombre contiene "legado".
+3. Recorre todas las relaciones `Rel(origen, destino, ...)`.
+4. Falla si alguna relación con el legado tiene un origen distinto del Sincronizador. La única excepción es el sistema PIA completo en el diagrama de contexto.
+
+Por ejemplo, si un cambio agregara `Rel(api, legado, "Consulta prerrequisitos")` al diagrama de contenedores, la ejecución termina con código 1 y este mensaje:
+
+```
+Se encontraron 1 incumplimientos de reglas arquitectónicas:
+  - R1 [c4-nivel2-contenedores.puml] 'api' se relaciona con el legado 'legado'; solo el Sincronizador puede hacerlo (POL-01).
+```
+
+La prueba `test_r1_rechaza_que_la_api_llame_al_legado` garantiza que el verificador sigue detectando ese caso.
+
+### 5.2 Control 2: pruebas automatizadas
+
+`pytest` ejecuta 23 pruebas en la versión actual:
+- 9 sobre las reglas;
+- 14 sobre la documentación: una por cada documento Markdown, que comprueba sus enlaces e imágenes, más las de entregables mínimos y niveles C4.
+
+El número crece automáticamente con cada documento nuevo.
+
+Un trabajo paralelo compila los diagramas con PlantUML 1.2024.7 (`-checkonly -failfast2`), que termina con error si algún diagrama tiene un error de sintaxis o una inclusión inexistente.
+
+### 5.3 Extensión de los controles cuando exista código
+
+Cuando inicie la construcción, el mismo flujo de pruebas ejecutará `mvn verify`, que incluye las pruebas unitarias, las de integración con PostgreSQL real (Testcontainers) de la Actividad 4 (V-02.1 a V-03.4) y las pruebas de arquitectura con ArchUnit:
+
+```java
+@AnalyzeClasses(packages = "co.edu.unisalle.pia")
+class ReglasArquitectura {
+  // POL-01: solo el Sincronizador conoce al legado
+  @ArchTest static final ArchRule aislamientoLegado = noClasses()
+      .that().resideOutsideOfPackage("..sincronizador..")
+      .should().dependOnClassesThat().resideInAPackage("..integracion.legado..");
+
+  // POL-02 (a): el dominio no depende de frameworks
+  @ArchTest static final ArchRule dominioPuro = noClasses()
+      .that().resideInAPackage("..dominio..")
+      .should().dependOnClassesThat().resideInAnyPackage("org.springframework..", "jakarta.persistence..");
+
+  // POL-02 (c): sin ciclos entre módulos
+  @ArchTest static final ArchRule sinCiclos = slices()
+      .matching("co.edu.unisalle.pia.(*)..").should().beFreeOfCycles();
+
+  // POL-03 (b): solo Control de cupos escribe el contador de inscritos
+  @ArchTest static final ArchRule cuposCentralizados = noClasses()
+      .that().resideOutsideOfPackage("..inscripciones.cupos..")
+      .should().callMethod(GrupoRepositorio.class, "incrementarInscritos", Long.class);
+}
+```
+
+### 5.4 Configuración de la rama protegida
+
+Para que los controles **impidan** integrar un cambio, y no solo lo informen, la rama principal se configura en GitHub, en *Settings → Branches → Branch protection rules*:
+- verificaciones obligatorias `Reglas R1-R4`, `Pruebas de reglas y de documentación` y `Compilación de los diagramas PlantUML`;
+- al menos 1 aprobación;
+- revisión de los propietarios de código ([`CODEOWNERS`](../.github/CODEOWNERS)) en las rutas protegidas;
+- prohibición de `push` directo.
+
+---
+
+## 6. Excepciones, incumplimientos y deuda técnica
+
+### 6.1 Procedimiento de excepción
+
+Una excepción es una autorización temporal y explícita para no cumplir una política.
+
+1. **Solicitud.** El desarrollador abre un *issue* con la etiqueta `excepcion-arquitectura` que indique: política afectada, alcance exacto (archivos o componentes), justificación, riesgo, medida compensatoria y fecha de vencimiento propuesta.
+2. **Aprobación.**
+   - Para POL-02 y POL-04, la aprueba el líder técnico en ≤ 2 días hábiles.
+   - Para POL-01 y POL-03, que protegen los dos drivers de mayor prioridad, la aprueba el comité.
+   - **No se aprueban excepciones a POL-03 (a)**, es decir, eliminar `ck_cupo` o el índice único, porque protegen la condición C04, que no admite excepciones.
+3. **Registro.** La excepción aprobada se agrega al [registro de excepciones](gobernanza/registro-excepciones.md) con su identificador `EXC-NNN`. Cualquier supresión de una regla en el código (por ejemplo, `@ArchIgnore` o un archivo de congelamiento de ArchUnit) debe citar ese identificador en un comentario.
+4. **Vencimiento.** Máximo un período académico. Al vencer, la excepción se corrige o se convierte en deuda técnica registrada; no se renueva automáticamente.
+
+### 6.2 Manejo de incumplimientos
+
+| Momento de detección | Qué ocurre | Responsable | Plazo |
+|---|---|---|---|
+| En la integración continua (antes de integrar) | La verificación falla y la rama protegida impide integrar. El autor corrige o solicita una excepción (6.1). | Autor | Antes de integrar |
+| En revisión o auditoría posterior (por ejemplo, un cambio integrado sin pasar por los controles) | Se abre un *issue* con la etiqueta `incumplimiento` y se clasifica según la severidad (filas siguientes). | Líder técnico | — |
+| Severidad crítica: afecta C04, la integridad de datos o POL-01 en producción | Corrección inmediata, análisis del incidente sin culpables en ≤ 5 días hábiles y nueva regla automática que lo habría detectado. | Comité | Inmediato |
+| Severidad mayor | Corrección antes del siguiente período de matrícula. | Líder técnico | Antes de la próxima matrícula |
+| Severidad menor | Se registra como deuda técnica (6.3). | Autor | Según priorización |
+
+### 6.3 Deuda técnica
+
+La deuda técnica es el costo futuro de un atajo tomado hoy (Cunningham, 1992); se gestiona de forma explícita (Kruchten, Nord y Ozkaya, 2019).
+
+- **Registro:** [docs/gobernanza/deuda-tecnica.md](gobernanza/deuda-tecnica.md), con identificador, descripción, origen, driver afectado, severidad, responsable y fecha objetivo. Hoy contiene tres partidas conocidas (DT-001 a DT-003).
+- **Capacidad reservada:** el 15 % de la capacidad de cada iteración se dedica a reducir deuda, priorizada por el líder técnico según el driver afectado.
+- **Regla de corte antes de cada matrícula:** no puede quedar abierta ninguna deuda de severidad *alta* que afecte QAS-01, QAS-02 o QAS-03. Si queda alguna, el comité decide entre corregirla o aceptar el riesgo de forma documentada.
+- **Revisión:** mensual, y en la revisión posterior a cada matrícula (sección 4.3).
+
+---
+
+## 7. Criterios para aceptar o rechazar una solicitud de integración (Pull Request)
+
+### 7.1 Una solicitud de integración se **acepta** solo si cumple **todos** estos criterios
+
+| # | Criterio | Cómo se comprueba |
+|---|---|---|
+| A1 | Las tres verificaciones automáticas están en verde: reglas R1-R4, pruebas automatizadas y compilación de los diagramas. Cuando exista código, también `mvn verify` con ArchUnit y las pruebas de integración. | Automático (rama protegida) |
+| A2 | Tiene al menos 1 aprobación de un desarrollador distinto del autor. | Automático (rama protegida) |
+| A3 | Si modifica rutas protegidas (`CODEOWNERS`), tiene la aprobación del líder técnico; si afecta infraestructura, también la del administrador. | Automático (`CODEOWNERS`) |
+| A4 | Si es un cambio significativo (sección 3.2), incluye o referencia un ADR en estado `Aceptado`. | Revisión con la plantilla de la solicitud |
+| A5 | Si cambia contenedores, componentes, comunicación o transacciones, incluye los `.puml` actualizados con sus SVG y PNG. | R4 automática más revisión |
+| A6 | Incluye pruebas del comportamiento nuevo. Si toca cupos o inscripciones, la prueba V-03.1 pasa. | Revisión más integración continua |
+| A7 | Toda supresión de una regla cita una excepción `EXC-NNN` vigente. | Revisión |
+| A8 | Las dependencias nuevas tienen licencia libre (RES-01). | Revisión |
+| A9 | Su tamaño permite revisarla: ≤ 400 líneas cambiadas, sin contar archivos generados como SVG o PNG, o con una justificación. | Revisión |
+
+### 7.2 Una solicitud de integración se **rechaza** si ocurre **cualquiera** de estos casos
+
+| # | Causa de rechazo | Política |
+|---|---|---|
+| X1 | Alguna verificación automática falla. | Todas |
+| X2 | Introduce una comunicación con el legado desde un componente distinto del Sincronizador, o una llamada síncrona al legado en una operación de usuario. | POL-01 |
+| X3 | Crea un ciclo entre módulos o accede a clases internas o a tablas de otro módulo. | POL-02 |
+| X4 | Elimina o debilita `ck_cupo` o el índice único, o modifica `inscritos` fuera de Control de cupos. | POL-03 |
+| X5 | Modifica la decisión de un ADR aceptado en lugar de reemplazarlo con uno nuevo. | POL-04 |
+| X6 | Cambia la estructura sin actualizar diagramas ni ADR. | POL-04 |
+| X7 | Agrega un servicio o dependencia comercial, o un componente que el equipo no puede operar, sin un ADR aprobado. | RES-01, RES-02 |
+
+---
+
+## 8. Estrategia para que la documentación y los diagramas evolucionen con la solución
+
+1. **Un solo repositorio.** Documentación, ADR, fuentes de los diagramas, reglas y, más adelante, el código viven juntos y se versionan con las mismas solicitudes de integración. No existe una "versión de la documentación" aparte del software.
+2. **Diagramas como código.** Las fuentes `.puml` son texto, así que sus cambios se revisan línea a línea. La integración continua comprueba que compilen y que tengan sus versiones SVG y PNG (R4).
+3. **El modelo es verificable.** La regla R1 analiza el modelo C4 y, cuando exista código, ArchUnit verificará las mismas reglas sobre el código. Si el código y el diagrama divergen, una de las dos verificaciones falla.
+4. **La lista de verificación de la solicitud obliga a la pregunta:** "¿Este cambio altera contenedores, componentes, comunicación o transacciones?". Si la respuesta es sí, el criterio A5 exige actualizar los diagramas en la misma solicitud.
+5. **Definición de terminado:** una historia no está terminada si su cambio arquitectónico no se refleja en los diagramas y ADR correspondientes.
+6. **Evidencias versionadas.** Los resultados de las pruebas de preproducción de la Actividad 4 (k6, simulacros, conciliaciones) se guardan en `docs/evidencias/<período>/`. Las medidas de los escenarios de calidad se actualizan con datos reales en la revisión posterior a cada matrícula.
+7. **Versiones etiquetadas.** Al cerrar cada período de matrícula se crea una etiqueta de Git (por ejemplo, `arquitectura-2027-1`) que fija el estado de la documentación vigente durante ese período.
+
+---
+
+## Referencias (secciones 5 a 8)
+
+- Cunningham, W. (1992). The WyCash portfolio management system. *OOPSLA '92 Experience Report*.
+- Ford, N., Parsons, R. y Kua, P. (2017). *Building Evolutionary Architectures*. O'Reilly.
+- Kruchten, P., Nord, R. y Ozkaya, I. (2019). *Managing Technical Debt: Reducing Friction in Software Development*. Addison-Wesley.
+- Nygard, M. (2011). *Documenting Architecture Decisions*.
+- TNG Technology Consulting (2024). *ArchUnit User Guide*. archunit.org.
