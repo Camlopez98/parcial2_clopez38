@@ -205,3 +205,169 @@ El bloqueo sobre la fila del grupo se toma en el paso 4 y se libera en el `COMMI
 | V-03.3 Conflicto de horario concurrente | Prueba automática: el mismo estudiante inscribe al mismo tiempo dos grupos con horario cruzado. | Exactamente 1 inscripción aceptada. |
 | V-03.4 Restricción declarativa | Prueba automática: un `UPDATE` directo que intenta `inscritos = capacidad + 1`. | El motor lo rechaza con violación de `ck_cupo`. |
 | V-03.5 Conciliación en producción | Consulta programada al cierre de cada jornada de matrícula: grupos con inscripciones activas mayores que la capacidad, o con `inscritos` distinto del número real de inscripciones activas. | 0 filas. Cualquier fila genera un incidente. |
+
+---
+
+## TAC-04. Control de la demanda: limitación de tasa, colas acotadas y caché de lectura
+
+**Atributo de calidad:** eficiencia de desempeño. Combina tácticas para controlar la demanda (gestionar las solicitudes de trabajo y limitar la respuesta a eventos) con tácticas para gestionar recursos (acotar el tamaño de las colas y mantener múltiples copias de los datos) (Bass et al., 2021).
+
+**Problema específico:**
+- En la apertura de la matrícula, 1.200 estudiantes generan una ráfaga de consultas y escrituras.
+- Los reintentos multiplican esa carga: un estudiante impaciente repite el clic o recarga la página.
+- Sin límites, la base de datos recibe más trabajo del que puede atender, las colas internas crecen sin control y el tiempo de respuesta se degrada para **todos**, incumpliendo C02.
+
+**Componentes donde se implementa:**
+- *Proxy inverso (Nginx)*: límite por dirección IP y balanceo.
+- *API*: límite por estudiante para escrituras (Bucket4j), pool de conexiones acotado (HikariCP), límite de hilos del servidor web y caché de la oferta (Caffeine).
+- *Aplicación web*: respeta el encabezado `Retry-After` y reutiliza la clave de idempotencia.
+
+**Funcionamiento técnico:**
+
+1. **Dimensionamiento con la ley de Little** (L = λW; Little, 1961). Supuesto de diseño: cada estudiante conectado hace en promedio una solicitud cada 10 s.
+   - Tasa de llegada: λ ≈ 1.200 / 10 = **120 solicitudes por segundo**.
+   - Con un tiempo de servicio objetivo W ≈ 0,2 s, el número medio de solicitudes en curso es L = 120 × 0,2 ≈ **24**, es decir, unas 12 por instancia de la API.
+   - Un pool de **30 conexiones por instancia** (60 en total, con PostgreSQL configurado para 100) da un margen de 2,5 veces para picos sin saturar el motor.
+   - Ese supuesto se debe validar en la prueba de carga.
+2. **Límite de tasa en dos niveles** (algoritmo de cubeta de *tokens*; Tanenbaum y Wetherall, 2011):
+   - **Nginx**, por dirección IP: `limit_req` de 30 solicitudes/s con ráfaga de 60. El valor es holgado porque muchos estudiantes del campus comparten IP a través de la red inalámbrica. Su función es frenar abusos, no a los estudiantes.
+   - **API**, por estudiante (identificado por el token): 5 solicitudes de inscripción o cancelación cada 10 s. Lo que exceda ese límite recibe `429 Too Many Requests` con `Retry-After`.
+3. **Colas acotadas y rechazo rápido:**
+   - El servidor web de la API admite un máximo de 200 hilos y una cola de 100 conexiones.
+   - HikariCP espera como máximo 2 s por una conexión. Si no la obtiene, responde `503` con `Retry-After: 5` en lugar de dejar la solicitud esperando indefinidamente.
+   - Así, una sobrecarga produce rechazos rápidos y explícitos, no tiempos de espera generalizados.
+4. **Caché de lectura de la oferta.** El listado de asignaturas y grupos, que cambia poco, se guarda en la memoria de cada instancia durante 5 s (Caffeine). El número de cupos que se muestra puede tener hasta 5 s de antigüedad; la validación definitiva ocurre en T1 (CF-02, ADR-002).
+5. **Cliente disciplinado.** La aplicación web deshabilita el botón de inscribir mientras hay una solicitud en curso. Ante `429` o `503`, espera lo que indica `Retry-After` y reintenta con la **misma** clave de idempotencia.
+
+**Beneficios:**
+- Bajo sobrecarga, el sistema se degrada de forma controlada y predecible: las solicitudes admitidas cumplen C02 y las rechazadas reciben una respuesta inmediata.
+- La caché reduce la mayor parte de las lecturas de oferta a la base de datos durante el pico.
+- Los reintentos del cliente quedan regulados.
+
+**Costos:**
+- Un estudiante puede recibir ocasionalmente "intente en unos segundos".
+- Los límites deben calibrarse con datos reales de cada matrícula.
+- La caché muestra cupos con hasta 5 s de antigüedad.
+- Cada instancia lleva su propio contador de límite por estudiante. Con dos instancias, el límite efectivo puede llegar al doble, lo que se considera aceptable frente al costo de un almacén compartido (RES-02).
+
+**Alcance:**
+- **Cubre** la protección de la API y de PostgreSQL ante picos y ráfagas de reintentos, y el cumplimiento de C02 para las solicitudes admitidas.
+- **No cubre** un aumento sostenido de la demanda muy por encima de la capacidad dimensionada: en ese caso hay que agregar capacidad, y aplica la condición de revisión del ADR-001.
+- **No reemplaza** la idempotencia (TAC-03): limitar la tasa reduce los reintentos, pero no impide que uno llegue dos veces.
+
+**Mecanismo de verificación:**
+
+| Prueba | Cómo se ejecuta | Criterio de aprobación |
+|---|---|---|
+| V-04.1 Carga nominal (QAS-04) | Prueba de carga con k6 en preproducción, antes de cada matrícula: 1.200 usuarios virtuales durante 15 min, con mezcla de 80 % consultas, 15 % inscripciones y 5 % cancelaciones, y 10 s de pausa entre acciones. | Percentil 95 de consultas ≤ 2 s; percentil 95 de inscripciones ≤ 3 s; errores (5xx) < 1 %; conexiones activas a PostgreSQL ≤ 60. |
+| V-04.2 Pico por encima de lo nominal | La misma prueba, escalando a 1.800 usuarios (+50 %) durante 5 min. | Las solicitudes admitidas mantienen el percentil 95 ≤ 2 s. El exceso se rechaza con `429` o `503` en < 100 ms, sin tiempos de espera agotados. Al bajar la carga, el sistema vuelve a 0 rechazos en ≤ 1 min. |
+| V-04.3 Ráfaga de reintentos | Un grupo de usuarios virtuales repite cada inscripción 5 veces en 2 s. | Respuestas `429` o idénticas a la original, 0 inscripciones duplicadas (verificado con V-03.2) y sin impacto en el percentil 95 de los demás usuarios. |
+| V-04.4 Indicador en producción | Métricas de latencia por percentil, tasa de 429 y 503, y uso del pool de conexiones (Micrometer y Prometheus). | Alerta si el percentil 95 de consultas supera 2 s durante 5 minutos seguidos. |
+
+---
+
+## TAC-05. Redundancia activa, redundancia pasiva y respaldo con archivado continuo
+
+**Atributo de calidad:** disponibilidad y recuperabilidad. Combina tácticas de recuperación: redundancia activa, redundancia pasiva y respaldo con recuperación (Bass et al., 2021).
+
+**Problema específico:**
+- Una falla de hardware, del sistema operativo o de PostgreSQL en el servidor principal detendría la matrícula y podría perder inscripciones.
+- C06 exige recuperar el servicio en ≤ 30 min y C07, perder como máximo 5 min de datos.
+- También existen las fallas *lógicas*, como un borrado accidental, que una réplica copiaría de inmediato.
+
+**Componentes donde se implementa:**
+- *API*: dos instancias activas detrás de Nginx.
+- *Base de datos*: primaria y réplica en espera con replicación en flujo.
+- *Repositorio de respaldos*: pgBackRest.
+- *Infraestructura*: servicios systemd con reinicio automático.
+
+**Funcionamiento técnico:**
+1. **Redundancia activa de la API.**
+   - Dos instancias atienden al mismo tiempo. Nginx verifica su salud: tras 3 fallas en 10 s, retira la instancia del balanceo.
+   - Como la API no guarda estado en memoria, la otra instancia atiende sin pérdida de sesión.
+   - Los despliegues se hacen de una instancia a la vez, de modo que una actualización no produce indisponibilidad.
+2. **Redundancia pasiva de la base de datos.**
+   - La réplica recibe continuamente el registro de transacciones de la primaria (replicación en flujo asíncrona) y queda lista para promoverse.
+   - Se elige la replicación asíncrona porque la síncrona agregaría latencia a cada `COMMIT`, y el RPO de 5 min no la exige.
+   - Hay una alerta si el retraso de replicación supera 60 s.
+3. **Conmutación por procedimiento documentado.** La ejecuta el administrador de infraestructura:
+
+   | Paso | Tiempo estimado |
+   |---|---|
+   | (1) Confirmar la caída de la primaria | 5 min |
+   | (2) Promover la réplica con `SELECT pg_promote()` | 1 min |
+   | (3) Apuntar la API al nuevo servidor (dirección virtual o configuración) y reiniciar las instancias | 5 min |
+   | (4) Ejecutar la conciliación de cupos V-03.5 | 5 min |
+   | (5) Reabrir las inscripciones | — |
+   | **Total** | **≈ 16–21 min, dentro de los 30 min de C06** |
+
+   Se descarta la conmutación automática (por ejemplo, Patroni con etcd) en esta etapa: agrega un clúster de consenso que el equipo de RES-02 tendría que operar, y el RTO de 30 minutos se alcanza de forma manual.
+4. **Respaldo con archivado continuo.**
+   - pgBackRest hace un respaldo completo semanal y uno diferencial diario.
+   - El registro de transacciones se archiva de forma continua, con `archive_timeout = 60 s`.
+   - Esto permite recuperar la base de datos a cualquier instante (*point-in-time recovery*), con una pérdida máxima de 1 minuto aunque se pierdan la primaria y la réplica. También protege contra borrados accidentales.
+
+**Beneficios:**
+- La falla de una instancia de la API es transparente para los usuarios.
+- La falla de la base de datos se recupera dentro del RTO.
+- Existe protección contra fallas lógicas.
+- Todo con software libre sobre la infraestructura existente (RES-01).
+
+**Costos:**
+- Se necesita un segundo servidor de base de datos y almacenamiento para respaldos.
+- La conmutación depende de que el administrador esté disponible. Durante la matrícula se requiere un turno de disponibilidad.
+- Hay que realizar simulacros periódicos.
+
+**Alcance:**
+- **Cubre** la falla de una instancia de la API, la falla del servidor de base de datos y la pérdida o corrupción de datos.
+- **No cubre** la caída del único proxy Nginx. Se mitiga con reinicio automático por systemd, y se puede agregar un segundo Nginx con dirección virtual (keepalived) si los indicadores de disponibilidad lo justifican.
+- **No cubre** la caída completa del centro de datos, que excede el alcance del caso.
+- **No cubre** las fallas del legado; esas las cubren TAC-01 y TAC-02.
+
+**Mecanismo de verificación:**
+
+| Prueba | Cómo se ejecuta | Criterio de aprobación |
+|---|---|---|
+| V-05.1 Falla de una instancia de la API | Durante V-04.1, se detiene una instancia de la API. | Errores < 1 % y percentil 95 ≤ 2 s; Nginx retira la instancia en ≤ 10 s. |
+| V-05.2 Simulacro de conmutación (RTO) | En preproducción, antes de cada matrícula, con carga activa: se apaga la primaria y se ejecuta el procedimiento. | Tiempo entre la falla y la primera inscripción exitosa ≤ 30 min (C06). |
+| V-05.3 Medición de la pérdida de datos (RPO) | Durante V-05.2, un proceso inserta un registro "latido" con marca de tiempo cada 10 s. Después de la conmutación se consulta el último latido presente. | Diferencia entre la hora de la falla y el último latido recuperado ≤ 5 min (C07). |
+| V-05.4 Restauración desde respaldo | Una vez al mes: se restaura con pgBackRest a un instante dado en un servidor de prueba. | Restauración exitosa al instante pedido, con un tiempo total registrado y conciliación de cupos (V-03.5) en 0 filas. |
+| V-05.5 Indicador en producción | Retraso de replicación y antigüedad del último registro de transacciones archivado. | Alerta si el retraso supera 60 s o si el último archivado tiene más de 5 min. |
+
+---
+
+## Matriz resumen de tácticas
+
+| Táctica | Escenario y medida | Componentes | Verificación principal | Momento |
+|---|---|---|---|---|
+| TAC-01 Interruptor de circuito y degradación | QAS-01: detección ≤ 30 s; 0 min de indisponibilidad por el legado | Sincronizador (adaptador), `estado_legado`, API (consulta de estado) | V-01.2 inyección de fallas de 40 min con carga | Antes de cada matrícula |
+| TAC-02 Outbox y reintento idempotente | QAS-01 / QAS-03: vaciado ≤ 15 min; 0 duplicados en el legado | Publicador de eventos, outbox, Sincronizador, Aplicar resultado | V-02.2 y V-02.3 (en cada Pull Request), V-02.4 | Integración continua y antes de cada matrícula |
+| TAC-03 Transacciones y restricciones declarativas | QAS-02 / QAS-03: inscritos ≤ capacidad; 0 duplicados | Inscribir asignatura, Control de cupos, Guardia de idempotencia, esquema | V-03.1 300 sobre 10 cupos | Cada Pull Request |
+| TAC-04 Control de la demanda | QAS-04: percentil 95 ≤ 2 s con 1.200 usuarios | Nginx, límite por estudiante, pool acotado, caché | V-04.1 y V-04.2 prueba de carga | Antes de cada matrícula |
+| TAC-05 Redundancia y respaldo | QAS-05: RTO ≤ 30 min, RPO ≤ 5 min | API ×2, réplica, pgBackRest | V-05.2 y V-05.3 simulacro con latidos | Antes de cada matrícula y mensual |
+
+## Plan de verificación por ambiente
+
+| Ambiente | Pruebas | Frecuencia | Responsable | Evidencia que se conserva |
+|---|---|---|---|---|
+| Integración continua (cada Pull Request) | V-01.1, V-02.1, V-02.2, V-02.3, V-03.1 a V-03.4 | En cada Pull Request; bloquean la integración si fallan (Actividad 5) | Desarrollador autor | Informe de la ejecución en el Pull Request |
+| Preproducción, con datos sintéticos de volumen real | V-01.2, V-01.3, V-02.4, V-04.1 a V-04.3, V-05.1 a V-05.3 | Antes de cada período de matrícula | Administrador de infraestructura y líder técnico | Informe de k6, registros del simulacro y resultados SQL, guardados en `docs/evidencias/<período>/` |
+| Producción | V-01.4, V-02.5, V-03.5, V-04.4, V-05.4, V-05.5 | Continuo, diario y mensual | Administrador de infraestructura | Alertas e informe posterior a la matrícula |
+
+Una táctica se considera **validada** solo cuando su verificación se ejecutó y cumplió el criterio numérico. Si un criterio falla, se registra como incumplimiento y se trata con el procedimiento de la Actividad 5.
+
+---
+
+## Referencias
+
+- Bass, L., Clements, P. y Kazman, R. (2021). *Software Architecture in Practice* (4.ª ed.). Addison-Wesley. Catálogos de tácticas de disponibilidad, rendimiento e integridad.
+- Berenson, H. et al. (1995). A critique of ANSI SQL isolation levels. *Proceedings of the ACM SIGMOD*.
+- Brooker, M. (2015). *Exponential Backoff and Jitter*. AWS Architecture Blog.
+- Codd, E. F. (1970). A relational model of data for large shared data banks. *CACM, 13*(6).
+- García-Molina, H. y Salem, K. (1987). Sagas. *Proceedings of the ACM SIGMOD*.
+- Gray, J. (1978). Notes on data base operating systems. En *Operating Systems: An Advanced Course*, LNCS 60. Springer.
+- Little, J. D. C. (1961). A proof for the queuing formula L = λW. *Operations Research, 9*(3), 383–387.
+- Nygard, M. (2018). *Release It!* (2.ª ed.). Pragmatic Bookshelf.
+- PostgreSQL Global Development Group (2024). *PostgreSQL 16 Documentation*, cap. 13 "Concurrency Control", cap. 26 "Backup and Restore" y cap. 27 "High Availability, Load Balancing, and Replication".
+- Richardson, C. (2018). *Microservices Patterns*. Manning.
+- Tanenbaum, A. y Wetherall, D. (2011). *Computer Networks* (5.ª ed.). Pearson. Algoritmo de cubeta de *tokens*.
