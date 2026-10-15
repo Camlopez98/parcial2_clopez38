@@ -1,0 +1,7 @@
+# Rutas protegidas: requieren aprobación del líder técnico (POL-01 a POL-04).
+# Mientras el proyecto está en fase de propuesta, el líder técnico es el autor de la arquitectura.
+/docs/actividad3/        @Camlopez98
+/docs/diagramas/         @Camlopez98
+/docs/actividad5.md      @Camlopez98
+/scripts/                @Camlopez98
+/.github/                @Camlopez98
