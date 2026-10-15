@@ -7,7 +7,8 @@ Container(proxy, "Proxy inverso", "Nginx", "TLS, balanceo, limitación de tasa")
 Container(sync, "Sincronizador", "Java / Spring Boot", "Despacha la outbox al legado y devuelve el resultado")
 ContainerDb(db, "Base de datos PIA", "PostgreSQL 16", "Esquemas inscripcion, oferta, historial, reglas, auditoria, integracion")
 
-Container_Boundary(api, "API PIA - Módulo Inscripciones y cupos") {
+Container_Boundary(api, "API PIA (contenedor)") {
+ Boundary(modIns, "Módulo Inscripciones y cupos", "módulo") {
   Component(ctrl, "Controlador REST de inscripciones", "Adaptador de entrada (Spring MVC)", "Expone inscribir, cancelar y consultar estado. Autentica al estudiante con el token y exige el encabezado Idempotency-Key.")
   Component(idem, "Guardia de idempotencia", "Servicio de aplicación", "Registra la clave de idempotencia en la misma transacción; si ya existe, devuelve la respuesta almacenada sin reejecutar.")
   Component(ucIns, "Caso de uso Inscribir asignatura", "Servicio de aplicación (límite transaccional)", "Orquesta en UNA transacción: bloqueo por estudiante, reglas, cupo, inscripción, outbox y auditoría.")
@@ -18,12 +19,15 @@ Container_Boundary(api, "API PIA - Módulo Inscripciones y cupos") {
   Component(cupos, "Control de cupos", "Puerto + adaptador SQL", "Descuenta el cupo con una actualización condicional atómica; libera cupos en cancelaciones y rechazos.")
   Component(repo, "Repositorio de inscripciones", "Puerto + adaptador JPA", "Persiste el agregado. Restricción de unicidad parcial sobre inscripciones activas.")
   Component(outbox, "Publicador de eventos de integración", "Puerto + adaptador SQL", "Inserta InscripcionRegistrada / InscripcionCancelada en integracion.outbox en la misma transacción.")
-}
+ }
+ Boundary(otros, "Otros módulos de la API usados por Inscripciones", "módulos") {
 
-Component(reglas, "Módulo Reglas académicas", "Interfaz pública del módulo", "Evalúa prerrequisitos, conflicto de horario, límite de créditos y fechas del período.")
-Component(hist, "Módulo Historial académico", "Interfaz pública del módulo", "Copia local del historial importada del legado, con marca de vigencia por estudiante.")
-Component(oferta, "Módulo Oferta académica", "Interfaz pública del módulo", "Grupos, horarios y capacidad autorizada del período.")
-Component(audit, "Módulo Auditoría", "Interfaz pública del módulo", "Registro de solo inserción: actor, operación, estado anterior y nuevo, fecha y origen.")
+  Component(reglas, "Módulo Reglas académicas", "Interfaz pública del módulo", "Evalúa prerrequisitos, conflicto de horario, límite de créditos y fechas del período.")
+  Component(hist, "Módulo Historial académico", "Interfaz pública del módulo", "Copia local del historial importada del legado, con marca de vigencia por estudiante.")
+  Component(oferta, "Módulo Oferta académica", "Interfaz pública del módulo", "Grupos, horarios y capacidad autorizada del período.")
+  Component(audit, "Módulo Auditoría", "Interfaz pública del módulo", "Registro de solo inserción: actor, operación, estado anterior y nuevo, fecha y origen.")
+ }
+}
 
 Rel(proxy, ctrl, "Solicitudes", "HTTP / JSON")
 Rel(ctrl, idem, "Verifica / registra la clave")

@@ -75,7 +75,7 @@ PIA escribe directamente en las tablas del legado, con una transacción distribu
 ## 7. Comportamiento durante el Escenario A
 
 ### 7.1 Detección
-- El interruptor de circuito del Sincronizador se abre tras 5 fallas seguidas o 30 s sin respuesta.
+- El interruptor de circuito del Sincronizador se abre tras 5 fallas seguidas (unos 25 s, dado el tiempo máximo de espera de 5 s por llamada).
 - El Sincronizador registra `estado_legado = NO_DISPONIBLE` y la hora de inicio.
 - Se envía una alerta al administrador de infraestructura y al área de registro académico.
 

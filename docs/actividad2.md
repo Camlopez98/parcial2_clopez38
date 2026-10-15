@@ -69,6 +69,7 @@ Todas son de código abierto y se ejecutan sobre Linux (RES-01).
 | Proxy inverso y balanceo de carga | Nginx | Terminación TLS, balanceo entre las instancias de la API, limitación de tasa y servicio de archivos estáticos con un solo componente. |
 | Base de datos | PostgreSQL 16 con réplica en espera (replicación en flujo) y archivado del registro de transacciones con pgBackRest | Ya es parte de la infraestructura (C08). La réplica y el archivado continuo cubren el RTO de 30 minutos y el RPO de 5 minutos (QAS-05). |
 | Autenticación | Proveedor de identidad institucional mediante OpenID Connect | Reutiliza la cuenta institucional y evita almacenar credenciales en PIA (QAS-06). |
+| Observabilidad | Micrometer (métricas en la API y el Sincronizador), Prometheus con Alertmanager | Mide latencias por percentil, estado del interruptor de circuito, eventos pendientes y retraso de replicación, y genera las alertas que exigen las tácticas de la Actividad 4. Lo opera el administrador de infraestructura como servicio transversal; no se dibuja como contenedor de negocio. |
 
 ---
 
@@ -136,7 +137,7 @@ No se incluyen un broker de mensajería, una caché distribuida ni un orquestado
 ### 3.3 Cómo responde la estructura al Escenario A
 
 Durante los 40 minutos sin legado:
-1. El interruptor de circuito del Sincronizador se abre tras 5 fallas seguidas o 30 s sin respuesta. El Sincronizador escribe `estado_legado = NO_DISPONIBLE` y deja de intentar enviar, salvo una prueba periódica cada 30 s.
+1. El interruptor de circuito del Sincronizador se abre tras 5 fallas seguidas (unos 25 s, dado el tiempo máximo de espera de 5 s por llamada). El Sincronizador escribe `estado_legado = NO_DISPONIBLE` y deja de intentar enviar, salvo una prueba periódica cada 30 s.
 2. La API **no cambia su funcionamiento**: sigue validando contra la copia local del historial, descontando cupos en PostgreSQL y dejando eventos en la bandeja de salida. Como lee `estado_legado`, informa al estudiante: "Tu inscripción está registrada y reservada; será oficial cuando se sincronice con el sistema académico".
 3. Solo se restringen las inscripciones de estudiantes cuya copia del historial está marcada como no vigente (SUP-02). Se rechazan con un mensaje explícito y sin consumir cupo.
 4. Cuando el legado responde a la prueba, el interruptor se cierra y el Sincronizador vacía la bandeja de salida en orden de llegada, con un ritmo limitado para no saturar al legado recién recuperado.
@@ -176,7 +177,7 @@ Así, cambiar el mecanismo de persistencia o el protocolo de entrada no altera l
 
 ### 4.3 Módulos relacionados
 
-Se muestran como cajas en el diagrama porque el módulo de inscripciones los usa, pero cada uno es un módulo propio de la API.
+Pertenecen al mismo contenedor (API PIA). En el diagrama aparecen dentro de ese contenedor, en un límite aparte, porque solo se muestra su interfaz pública: el módulo de inscripciones depende de ellos, no de su estructura interna (DEP-02).
 
 | Módulo | Responsabilidad | Cómo lo usa Inscripciones | Driver |
 |---|---|---|---|

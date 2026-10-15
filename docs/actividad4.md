@@ -38,7 +38,7 @@ Para cada táctica se documentan:
 1. **Tiempo de espera.** Toda llamada al legado tiene un límite de 5 s, para que ninguna operación espere indefinidamente.
 2. **Interruptor de circuito** con tres estados:
    - *Cerrado*: las llamadas pasan.
-   - *Abierto*: se activa tras 5 fallas seguidas o un 50 % de fallas en una ventana de 20 llamadas. Las llamadas se rechazan de inmediato sin tocar al legado.
+   - *Abierto*: se activa cuando, con al menos 5 llamadas evaluadas, el 50 % o más de las últimas 20 fallan o tardan más de 5 s. Por eso 5 fallas seguidas, unos 25 s, abren el circuito dentro del límite de 30 s de QAS-01. Las llamadas se rechazan de inmediato sin tocar al legado.
    - *Semiabierto*: después de 30 s abierto, se permite una llamada de prueba; si tiene éxito el circuito se cierra, y si falla vuelve a abrirse.
 3. **Publicación del estado.** Cada cambio de estado del circuito se escribe en `estado_legado`, con hora de inicio, y genera una alerta al administrador y a registro académico.
 4. **Degradación controlada.** La API lee `estado_legado` y, sin cambiar su lógica de inscripción (ADR-003), activa el banner informativo. Restringe solo las inscripciones de estudiantes con copia del historial no vigente (ADR-004).
@@ -49,6 +49,7 @@ Para cada táctica se documentan:
 resilience4j.circuitbreaker.instances.legado:
   slidingWindowType: COUNT_BASED
   slidingWindowSize: 20
+  minimumNumberOfCalls: 5
   failureRateThreshold: 50
   slowCallDurationThreshold: 5s
   waitDurationInOpenState: 30s
